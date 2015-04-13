@@ -30,7 +30,7 @@ CFLAGS=-fPIC -g -finline-functions -Wall -Werror
 all: $(TARGET)
 
 clean:
-	rm -rf *.o $(TARGET)
+	rm -rf *.o $(TARGET) log
 
 hash: hash.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@

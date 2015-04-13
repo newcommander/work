@@ -2,10 +2,12 @@
 #include <sys/types.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <signal.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "event2/event.h"
 #include "openssl/sha.h"
@@ -125,7 +127,7 @@ void get_tiny(struct evhttp_request *req, void *arg)
 
 void statistic_handler(struct evhttp_request *req, void *arg)
 {
-    ;
+    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
 }
 
 void *dispatch(void *arg)
@@ -183,6 +185,23 @@ int start(int port, int thread_num)
     return (int)(g_threads.size());
 }
 
+static void sig_alrm(int signo)
+{
+    time_t tt = time(NULL);
+    char buf[16];
+    snprintf(buf, 11, "%lld", (long long)tt);
+    std::string tt_buf = buf;
+
+    if (g_time_now != tt_buf) {
+        pthread_mutex_lock(&g_seed_lock);
+        g_time_now = buf;
+        g_seed_ct = 0;
+        pthread_mutex_unlock(&g_seed_lock);
+    }
+
+    alarm(2);
+}
+
 int main(int argc, char **argv)
 {
     int ret = 0;
@@ -203,7 +222,12 @@ int main(int argc, char **argv)
         }
     }
 
-    my_log_init(".", "hash.log", "hash.log.we", 16);
+    if (mkdir("log", 0755) < 0) {
+        printf("mkdir log failed\n");
+        return 1;
+    }
+
+    my_log_init(".", "log/hash.log", "log/hash.log.we", 16);
 
     if (port <= 1024) {
         LOG_ERROR("Invalid port number: %d, should >1024", port);
@@ -214,6 +238,13 @@ int main(int argc, char **argv)
     if (thread_num < 1) {
         thread_num = 1;
     }
+
+    if (signal(SIGALRM, sig_alrm) == SIG_ERR) {
+        LOG_ERROR();
+        my_log_close();
+        return 1;
+    }
+    alarm(2);
 
     ret = start(port, thread_num);
     if (ret < 1) {
