@@ -17,9 +17,18 @@
 #include <vector>
 #include <map>
 
-#define MAKE_SEED(seed, ip) \
+pthread_mutex_t g_seed_lock = PTHREAD_MUTEX_INITIALIZER;
+std::string g_time_now;
+unsigned long long g_seed_ct = 0;
+
+#define MAKE_SEED(seed) \
     do { \
-        ; \
+        pthread_mutex_lock(&g_seed_lock); \
+        char tt[32]; \
+        snprintf(tt, 17, "%.16llu", g_seed_ct); \
+        seed += g_time_now + tt; \
+        g_seed_ct++; \
+        pthread_mutex_unlock(&g_seed_lock); \
     } while (0)
 
 struct tiny {
@@ -85,27 +94,12 @@ void new_tiny(struct evhttp_request *req, void *arg)
         return;
     }
 
-//    MAKE_SEED(seed, req->remote_host);
-    tag = seed + req->remote_host;
+    MAKE_SEED(seed);
 
-    struct evbuffer *buf = evbuffer_new();
-    if (!buf) {
-        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        return;
-    }
-
-    evbuffer_add_printf(buf, "{\"tag\":\"%s\"}", tag.c_str());
-    evhttp_send_reply(req, HTTP_OK, "OK", buf);
-    LOG_INFO("new tiny");
-}
-
-void get_tiny(struct evhttp_request *req, void *arg)
-{
-    unsigned char md[1024];
     char md_v[129];
+    unsigned char md[1024];
     memset(md_v, 0, 129);
-    ;
-    SHA512((unsigned char*)"HAHA", 4, md);
+    SHA512((unsigned char*)seed.c_str(), seed.length(), md);
     int n = 64;
     while (n--) {
         snprintf(&md_v[126-2*n], 3, "%.2x", md[63-n]);
@@ -113,7 +107,19 @@ void get_tiny(struct evhttp_request *req, void *arg)
     md_v[128] = 0;
 
     struct evbuffer *buf = evbuffer_new();
-    evbuffer_add_printf(buf, "%s\n", md_v);
+    if (!buf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        return;
+    }
+
+    evbuffer_add_printf(buf, "{\"tag\":\"%s\"}", md_v);
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
+}
+
+void get_tiny(struct evhttp_request *req, void *arg)
+{
+    struct evbuffer *buf = evbuffer_new();
+    evbuffer_add_printf(buf, "%s\n", "sha512");
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
