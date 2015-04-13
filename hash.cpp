@@ -1,18 +1,33 @@
-#include <stdio.h>
-#include <sys/types.h>
 #include <sys/socket.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <sys/types.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 
 #include "event2/event.h"
 #include "openssl/sha.h"
+#include "json/json.h"
 #include "evhttp.h"
 #include "mylog.h"
 
+#include <string>
 #include <vector>
+#include <map>
+
+#define MAKE_SEED(seed, ip) \
+    do { \
+        ; \
+    } while (0)
+
+struct tiny {
+    std::string tag;
+    std::vector<std::string> other_tags;
+};
+
+std::map<std::string, struct tiny> g_tiny_root;
 
 std::vector<pthread_t> g_threads;
 
@@ -53,14 +68,38 @@ int prepar_socket(int port, int backlog)
     return fd;
 }
 
-void range_handler(struct evhttp_request *req, void *arg)
+void new_tiny(struct evhttp_request *req, void *arg)
 {
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
-    LOG_INFO("range handler");
-    return;
+    // url : http://localhost:8888/new_tiny?seed=xxxx
+    // ret : { "tag" : "xxxxxxxxxxxxxxxxxxxxxxxxxx" }
+
+    std::string seed = "";
+    std::string tag = "";
+    struct evkeyvalq res;
+    evhttp_parse_query(req->uri, &res);
+    const char *value = NULL;
+    if ((value = evhttp_find_header(&res, "seed")) != NULL) {
+        seed = value;
+    } else {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
+        return;
+    }
+
+//    MAKE_SEED(seed, req->remote_host);
+    tag = seed + req->remote_host;
+
+    struct evbuffer *buf = evbuffer_new();
+    if (!buf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        return;
+    }
+
+    evbuffer_add_printf(buf, "{\"tag\":\"%s\"}", tag.c_str());
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
+    LOG_INFO("new tiny");
 }
 
-void gen_handler(struct evhttp_request *req, void *arg)
+void get_tiny(struct evhttp_request *req, void *arg)
 {
     unsigned char md[1024];
     char md_v[129];
@@ -76,6 +115,11 @@ void gen_handler(struct evhttp_request *req, void *arg)
     struct evbuffer *buf = evbuffer_new();
     evbuffer_add_printf(buf, "%s\n", md_v);
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
+}
+
+void statistic_handler(struct evhttp_request *req, void *arg)
+{
+    ;
 }
 
 void *dispatch(void *arg)
@@ -114,8 +158,10 @@ int start(int port, int thread_num)
             continue;
         }
 
-        evhttp_set_cb(httpd, "/range", range_handler, NULL);
-        evhttp_set_gencb(httpd, gen_handler, NULL);
+        evhttp_set_cb(httpd, "/new_tiny", new_tiny, NULL);
+        evhttp_set_cb(httpd, "/get_tiny", get_tiny, NULL);
+        evhttp_set_cb(httpd, "/statistic", statistic_handler, NULL);
+        //evhttp_set_gencb(httpd, gen_handler, NULL);
 
         pthread_t thread;
         if (pthread_create(&thread, NULL, dispatch, base) != 0) {
