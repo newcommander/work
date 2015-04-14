@@ -355,7 +355,7 @@ void statistic_handler(struct evhttp_request *req, void *arg)
         LOG_DEBUG("[statistic handler] evbuffer_new failed");
         return;
     }
-    evbuffer_add_printf(buf, "size: %ld\n", g_tiny_root.size());
+    evbuffer_add_printf(buf, "tiny count: %ld\n", g_tiny_root.size());
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
