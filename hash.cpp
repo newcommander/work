@@ -44,12 +44,6 @@ std::vector<pthread_t> g_threads;
         pthread_mutex_unlock(&g_seed_lock); \
     } while (0)
 
-#define MAKE_TRIGGER_TO_JSON(tiny, json) \
-    do { \
-        json["name"] = tiny.name; \
-        json; \
-    } while (0)
-
 int prepar_socket(int port, int backlog)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
