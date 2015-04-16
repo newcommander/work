@@ -20,7 +20,7 @@ std::vector<pthread_t> g_threads;
 
 void control_handler(struct evhttp_request *req, void *arg)
 {
-    // url : http://localhost:8888/del_tags?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
+    // url : http://localhost:8888/control?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -222,7 +222,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    LOG_INFO("start %d recieving threads", ret);
+    LOG_INFO("start %d controlling threads", ret);
 
     std::vector<pthread_t>::iterator it;
     for (it = g_threads.begin(); it != g_threads.end(); it++) {

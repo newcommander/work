@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
+#include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <time.h>
@@ -27,6 +28,7 @@ public:
 };
 
 pthread_mutex_t g_seed_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t g_tiny_root_lock = PTHREAD_MUTEX_INITIALIZER;
 std::string g_time_now;
 unsigned long long g_seed_ct = 0;
 
@@ -115,7 +117,11 @@ void create_tiny(struct evhttp_request *req, void *arg)
     Tiny *tiny = new Tiny();
     tiny->name = md_v;
     tiny->tags.clear();
+
+    pthread_mutex_lock(&g_tiny_root_lock);
     g_tiny_root.insert(std::map<std::string, Tiny>::value_type(tiny->name, *tiny));
+    pthread_mutex_unlock(&g_tiny_root_lock);
+
     delete tiny;
 
     LOG_DEBUG("[create tiny] created a tiny success");
@@ -140,11 +146,14 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
     }
 
     std::map<std::string, Tiny>::iterator it;
+
+    pthread_mutex_lock(&g_tiny_root_lock);
     it = g_tiny_root.find(name);
     if (it != g_tiny_root.end()) {
         LOG_DEBUG("[destroy tiny] destroied a tiny success");
         g_tiny_root.erase(it);
     }
+    pthread_mutex_unlock(&g_tiny_root_lock);
     
     evhttp_send_reply(req, HTTP_OK, "OK", NULL);
 }
@@ -167,12 +176,15 @@ void query_tiny(struct evhttp_request *req, void *arg)
     }
 
     std::map<std::string, Tiny>::iterator iter;
+
+    pthread_mutex_lock(&g_tiny_root_lock);
     iter = g_tiny_root.find(name);
     if (iter == g_tiny_root.end()) {
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
         LOG_DEBUG("[query tiny] query a tiny, but not found it");
         return;
     }
+    pthread_mutex_unlock(&g_tiny_root_lock);
 
     Tiny &tiny = iter->second;
     Json::Value tags;
@@ -218,12 +230,15 @@ void add_tags(struct evhttp_request *req, void *arg)
     }
 
     std::map<std::string, Tiny>::iterator it;
+
+    pthread_mutex_lock(&g_tiny_root_lock);
     it = g_tiny_root.find(name);
     if (it == g_tiny_root.end()) {
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
         LOG_DEBUG("[add tags] add tags into a tiny, but not found this tiny");
         return;
     }
+    pthread_mutex_unlock(&g_tiny_root_lock);
 
     Tiny &tiny = it->second;
 
@@ -287,12 +302,15 @@ void del_tags(struct evhttp_request *req, void *arg)
     }
 
     std::map<std::string, Tiny>::iterator it;
+
+    pthread_mutex_lock(&g_tiny_root_lock);
     it = g_tiny_root.find(name);
     if (it == g_tiny_root.end()) {
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
         LOG_DEBUG("[del tags] delete tags of a tiny, but not found this tiny");
         return;
     }
+    pthread_mutex_unlock(&g_tiny_root_lock);
 
     Tiny &tiny = it->second;
 
@@ -349,8 +367,94 @@ void statistic_handler(struct evhttp_request *req, void *arg)
         LOG_DEBUG("[statistic handler] evbuffer_new failed");
         return;
     }
+
+    pthread_mutex_lock(&g_tiny_root_lock);
     evbuffer_add_printf(buf, "tiny count: %ld\n", g_tiny_root.size());
+    pthread_mutex_unlock(&g_tiny_root_lock);
+
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
+}
+
+void dump_handler(struct evhttp_request *req, void *arg)
+{
+    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+
+    Json::Value value;
+    std::map<std::string, Tiny>::iterator it;
+    std::set<std::string>::iterator iter;
+
+    pthread_mutex_lock(&g_tiny_root_lock);
+    for (it = g_tiny_root.begin(); it != g_tiny_root.end(); it++) {
+        for (iter = it->second.tags.begin(); iter != it->second.tags.end(); iter++) {
+            value[it->first].append(*iter);
+        }
+    }
+    pthread_mutex_unlock(&g_tiny_root_lock);
+
+    Json::FastWriter writer;
+    writer.omitEndingLineFeed();
+
+    FILE *fd = fopen("log/dump", "w");
+    if (!fd) {
+        LOG_ERROR("[dump handler] fopen log/dump failed: %s", strerror(errno));
+        return;
+    }
+    fwrite(writer.write(value).c_str(), writer.write(value).size(), 1, fd);
+    fclose(fd);
+}
+
+void load_handler(struct evhttp_request *req, void *arg)
+{
+    struct stat sb;
+    if (stat("log/dump", &sb) == -1) {
+        LOG_ERROR("[load handler] stat log/dump failed, cannot load it");
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        return;
+    }
+
+    char *buf = (char*)calloc(1, sb.st_size+1);
+    if (!buf) {
+        LOG_ERROR("[load handler] calloc(size: %ld) failed, cannot load it", sb.st_size+1);
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        return;
+    }
+
+    FILE *fd = fopen("log/dump", "r");
+    if (!fd) {
+        LOG_ERROR("[load handler] fopen log/dump failed: %s", strerror(errno));
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        free(buf);
+        return;
+    }
+
+    time_t start_point = time(NULL);
+    size_t ret = 0;
+    while (1) {
+        if (time(NULL) - start_point > 10) {
+            LOG_ERROR("[load handler] load failed, timeout");
+            evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+            fclose(fd);
+            free(buf);
+            return;
+        }
+        ret += fread(&(buf[ret]), sb.st_size - ret, 1, fd);
+        if (ret >= sb.st_size) {
+            break;
+        }
+    }
+    fclose(fd);
+
+    Json::Value value;
+    Json::Reader reader;
+    if (!reader.parse(buf, value)) {
+        LOG_ERROR("[load handler] json pares failed");
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        return;
+    }
+    free(buf);
+
+    ;
+    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
 }
 
 void *dispatch(void *arg)
@@ -395,6 +499,8 @@ int start(int port, int thread_num)
         evhttp_set_cb(httpd, "/add_tags", add_tags, NULL);
         evhttp_set_cb(httpd, "/del_tags", del_tags, NULL);
         evhttp_set_cb(httpd, "/statistic", statistic_handler, NULL);
+        evhttp_set_cb(httpd, "/dump", dump_handler, NULL);
+        evhttp_set_cb(httpd, "/load", load_handler, NULL);
         //evhttp_set_gencb(httpd, gen_handler, NULL);
 
         pthread_t thread;
