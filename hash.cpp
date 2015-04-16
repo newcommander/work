@@ -1,12 +1,12 @@
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <time.h>
 
 #include "event2/event.h"
@@ -118,7 +118,7 @@ void create_tiny(struct evhttp_request *req, void *arg)
     g_tiny_root.insert(std::map<std::string, Tiny>::value_type(tiny->name, *tiny));
     delete tiny;
 
-    LOG_DEBUG("[create tiny] created a tiny success, yes, a tiny, one step of which rise you UP ! YOU WIN !");
+    LOG_DEBUG("[create tiny] created a tiny success");
 
     evbuffer_add_printf(buf, "{\"name\":\"%s\"}", md_v);
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
@@ -448,9 +448,19 @@ int main(int argc, char **argv)
         }
     }
 
-    if (mkdir("log", 0755) < 0) {
-        printf("mkdir log failed\n");
-        return 1;
+    struct stat sb;
+    if (stat("log", &sb) == -1) {
+        if (mkdir("log", 0755) < 0) {
+            printf("mkdir log failed\n");
+            return 1;
+        }
+    } else {
+        if ((sb.st_mode & S_IFMT) != S_IFDIR) {
+            if (unlink("log") != 0) {
+                printf("I need ./log to be a directory, but it dose not, and rm failed");
+                return 1;
+            }
+        }
     }
 
     my_log_init(".", "log/hash.log", "log/hash.log.we", 16);
