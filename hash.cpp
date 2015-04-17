@@ -32,7 +32,10 @@ pthread_mutex_t g_tiny_root_lock = PTHREAD_MUTEX_INITIALIZER;
 std::string g_time_now;
 unsigned long long g_seed_ct = 0;
 
-std::map<std::string, Tiny> g_tiny_root;
+std::map<std::string, Tiny> g_tiny_root_master;
+std::map<std::string, Tiny> g_tiny_root_slaver;
+std::map<std::string, Tiny> *g_tiny_root_master_p;
+std::map<std::string, Tiny> *g_tiny_root_slaver_p;
 
 std::vector<pthread_t> g_threads;
 
@@ -119,7 +122,7 @@ void create_tiny(struct evhttp_request *req, void *arg)
     tiny->tags.clear();
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    g_tiny_root.insert(std::map<std::string, Tiny>::value_type(tiny->name, *tiny));
+    g_tiny_root_master_p->insert(std::map<std::string, Tiny>::value_type(tiny->name, *tiny));
     pthread_mutex_unlock(&g_tiny_root_lock);
 
     delete tiny;
@@ -148,10 +151,10 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
     std::map<std::string, Tiny>::iterator it;
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    it = g_tiny_root.find(name);
-    if (it != g_tiny_root.end()) {
+    it = g_tiny_root_master_p->find(name);
+    if (it != g_tiny_root_master_p->end()) {
         LOG_DEBUG("[destroy tiny] destroied a tiny success");
-        g_tiny_root.erase(it);
+        g_tiny_root_master_p->erase(it);
     }
     pthread_mutex_unlock(&g_tiny_root_lock);
     
@@ -178,8 +181,9 @@ void query_tiny(struct evhttp_request *req, void *arg)
     std::map<std::string, Tiny>::iterator iter;
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    iter = g_tiny_root.find(name);
-    if (iter == g_tiny_root.end()) {
+    iter = g_tiny_root_master_p->find(name);
+    if (iter == g_tiny_root_master_p->end()) {
+        pthread_mutex_unlock(&g_tiny_root_lock);
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
         LOG_DEBUG("[query tiny] query a tiny, but not found it");
         return;
@@ -232,8 +236,9 @@ void add_tags(struct evhttp_request *req, void *arg)
     std::map<std::string, Tiny>::iterator it;
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    it = g_tiny_root.find(name);
-    if (it == g_tiny_root.end()) {
+    it = g_tiny_root_master_p->find(name);
+    if (it == g_tiny_root_master_p->end()) {
+        pthread_mutex_unlock(&g_tiny_root_lock);
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
         LOG_DEBUG("[add tags] add tags into a tiny, but not found this tiny");
         return;
@@ -304,8 +309,9 @@ void del_tags(struct evhttp_request *req, void *arg)
     std::map<std::string, Tiny>::iterator it;
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    it = g_tiny_root.find(name);
-    if (it == g_tiny_root.end()) {
+    it = g_tiny_root_master_p->find(name);
+    if (it == g_tiny_root_master_p->end()) {
+        pthread_mutex_unlock(&g_tiny_root_lock);
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
         LOG_DEBUG("[del tags] delete tags of a tiny, but not found this tiny");
         return;
@@ -369,7 +375,8 @@ void statistic_handler(struct evhttp_request *req, void *arg)
     }
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    evbuffer_add_printf(buf, "tiny count: %ld\n", g_tiny_root.size());
+    evbuffer_add_printf(buf, "master root count: %ld\n", g_tiny_root_master_p->size());
+    evbuffer_add_printf(buf, "slaver root count: %ld\n", g_tiny_root_slaver_p->size());
     pthread_mutex_unlock(&g_tiny_root_lock);
 
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
@@ -384,7 +391,7 @@ void dump_handler(struct evhttp_request *req, void *arg)
     std::set<std::string>::iterator iter;
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    for (it = g_tiny_root.begin(); it != g_tiny_root.end(); it++) {
+    for (it = g_tiny_root_master_p->begin(); it != g_tiny_root_master_p->end(); it++) {
         for (iter = it->second.tags.begin(); iter != it->second.tags.end(); iter++) {
             value[it->first].append(*iter);
         }
@@ -401,6 +408,8 @@ void dump_handler(struct evhttp_request *req, void *arg)
     }
     fwrite(writer.write(value).c_str(), writer.write(value).size(), 1, fd);
     fclose(fd);
+
+    LOG_INFO("[load handler] load tiny success");
 }
 
 void load_handler(struct evhttp_request *req, void *arg)
@@ -428,7 +437,7 @@ void load_handler(struct evhttp_request *req, void *arg)
     }
 
     time_t start_point = time(NULL);
-    size_t ret = 0;
+    off_t ret = 0;
     while (1) {
         if (time(NULL) - start_point > 10) {
             LOG_ERROR("[load handler] load failed, timeout");
@@ -437,24 +446,62 @@ void load_handler(struct evhttp_request *req, void *arg)
             free(buf);
             return;
         }
-        ret += fread(&(buf[ret]), sb.st_size - ret, 1, fd);
-        if (ret >= sb.st_size) {
-            break;
-        }
+        ret += fread(&(buf[ret * sb.st_size]), sb.st_size - ret, 1, fd);
+        break;
     }
     fclose(fd);
 
     Json::Value value;
     Json::Reader reader;
     if (!reader.parse(buf, value)) {
-        LOG_ERROR("[load handler] json pares failed");
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] json pares failed");
         return;
     }
     free(buf);
 
-    ;
+    if (value.empty()) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] json value empty, load failed");
+        return;
+    }
+
+    Json::Value::Members root_members;
+    Json::Value::Members::iterator root_mem;
+    unsigned int tags_num = 0;
+    if (!value.isObject()) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] the json root is not an object, load failed");
+        return;
+    }
+    root_members = value.getMemberNames();
+    for (root_mem = root_members.begin(); root_mem != root_members.end(); root_mem++) {
+        Tiny tiny;
+        tiny.name = *root_mem;
+        if (!value[tiny.name].isArray()) {
+            evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+            LOG_ERROR("[load handler] the json data is not an array, load failed");
+            g_tiny_root_slaver_p->clear();
+            return;
+        }
+        tags_num = value[tiny.name].size();
+        Json::Value empty;
+        while (tags_num--) {
+            tiny.tags.insert(value[tiny.name].get(tags_num, empty).asString());
+        }
+        g_tiny_root_slaver_p->insert(std::map<std::string, Tiny>::value_type(tiny.name, tiny));
+    }
+
+    std::map<std::string, Tiny> *g_tiny_root_temp_p;
+
+    pthread_mutex_lock(&g_tiny_root_lock);
+    g_tiny_root_temp_p = g_tiny_root_master_p;
+    g_tiny_root_master_p = g_tiny_root_slaver_p;
+    g_tiny_root_slaver_p = g_tiny_root_temp_p;
+    pthread_mutex_unlock(&g_tiny_root_lock);
+
     evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    LOG_INFO("[load handler] load tiny success");
 }
 
 void *dispatch(void *arg)
@@ -471,6 +518,9 @@ int start(int port, int thread_num)
         LOG_ERROR("prepar socket failed: %s", strerror(errno));
         return -1;
     }
+
+    g_tiny_root_master_p = &g_tiny_root_master;
+    g_tiny_root_slaver_p = &g_tiny_root_slaver;
 
     while (thread_num--) {
         struct event_base *base = event_base_new();
