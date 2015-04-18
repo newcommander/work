@@ -17,10 +17,62 @@
 #include <map>
 
 std::vector<pthread_t> g_threads;
+CURL *g_url;
+char g_curl_errbuf[CURL_ERROR_SIZE];
+
+static int report_init()
+{
+    if (g_url) {
+        return 0;
+    }
+
+    g_url = curl_easy_init();
+    if (!g_url) {
+        LOG_ERROR("[report init] curl_easy_init failed");
+        return 1;
+    }
+
+    curl_easy_setopt(g_url, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(g_url, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(g_url, CURLOPT_USERAGENT, "tiny/op");
+    curl_easy_setopt(g_url, CURLOPT_ERRORBUFFER, g_curl_errbuf);
+
+    return 0;
+}
+
+static int report_send(std::string url, std::string post_data)
+{
+    int status = 0;
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Accept: ");
+    headers = curl_slist_append(headers, "Content-Type: ");
+
+    curl_easy_setopt(g_url, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(g_url, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(g_url, CURLOPT_POSTFIELDS, post_data.c_str());
+    status = curl_easy_perform(g_url);
+    curl_slist_free_all(headers);
+
+    if (status != CURLE_OK) {
+        LOG_ERROR("[report send] repotr failed: %s", g_curl_errbuf);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int report_clean()
+{
+    curl_easy_cleanup(g_url);
+    g_url = NULL;
+    return 0;
+}
 
 void control_handler(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/control?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
+    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    return;
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -165,6 +217,8 @@ int start(int port, int thread_num)
         g_threads.push_back(thread);
     }
 
+    report_init();
+
     return (int)(g_threads.size());
 }
 
@@ -228,6 +282,10 @@ int main(int argc, char **argv)
     for (it = g_threads.begin(); it != g_threads.end(); it++) {
         pthread_join(*it, NULL);
     }
+
+    report_clean();
+
+    LOG_INFO("tiny_op stop");
 
     my_log_close();
 

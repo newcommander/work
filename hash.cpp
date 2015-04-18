@@ -165,6 +165,7 @@ void query_tiny(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/query_tiny?name=xxxx
     // ret : { "name" : "xxxxx", "tags" : [ "xxxx", "xxxx", .... ] }
+    int deep = 1;
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -178,15 +179,21 @@ void query_tiny(struct evhttp_request *req, void *arg)
         return;
     }
 
+    if ((value = evhttp_find_header(&res, "deep")) != NULL) {
+        deep = atoi(value);
+    }
+
     std::map<std::string, Tiny>::iterator iter;
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    iter = g_tiny_root_master_p->find(name);
-    if (iter == g_tiny_root_master_p->end()) {
-        pthread_mutex_unlock(&g_tiny_root_lock);
-        evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
-        LOG_DEBUG("[query tiny] query a tiny, but not found it");
-        return;
+    while (deep--) {
+        iter = g_tiny_root_master_p->find(name);
+        if (iter == g_tiny_root_master_p->end()) {
+            pthread_mutex_unlock(&g_tiny_root_lock);
+            evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
+            LOG_DEBUG("[query tiny] query a tiny, but not found it");
+            return;
+        }
     }
     pthread_mutex_unlock(&g_tiny_root_lock);
 
