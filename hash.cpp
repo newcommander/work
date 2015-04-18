@@ -392,6 +392,7 @@ void dump_handler(struct evhttp_request *req, void *arg)
 
     pthread_mutex_lock(&g_tiny_root_lock);
     for (it = g_tiny_root_master_p->begin(); it != g_tiny_root_master_p->end(); it++) {
+        value[it->first].resize(0);
         for (iter = it->second.tags.begin(); iter != it->second.tags.end(); iter++) {
             value[it->first].append(*iter);
         }
@@ -409,7 +410,7 @@ void dump_handler(struct evhttp_request *req, void *arg)
     fwrite(writer.write(value).c_str(), writer.write(value).size(), 1, fd);
     fclose(fd);
 
-    LOG_INFO("[load handler] load tiny success");
+    LOG_INFO("[dump handler] dump tiny success");
 }
 
 void load_handler(struct evhttp_request *req, void *arg)
@@ -447,6 +448,7 @@ void load_handler(struct evhttp_request *req, void *arg)
             return;
         }
         ret += fread(&(buf[ret * sb.st_size]), sb.st_size - ret, 1, fd);
+        //TODO: dose file read complete???
         break;
     }
     fclose(fd);
@@ -498,6 +500,7 @@ void load_handler(struct evhttp_request *req, void *arg)
     g_tiny_root_temp_p = g_tiny_root_master_p;
     g_tiny_root_master_p = g_tiny_root_slaver_p;
     g_tiny_root_slaver_p = g_tiny_root_temp_p;
+    g_tiny_root_slaver_p->clear();
     pthread_mutex_unlock(&g_tiny_root_lock);
 
     evhttp_send_reply(req, HTTP_OK, "OK", NULL);
