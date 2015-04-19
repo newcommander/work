@@ -100,15 +100,15 @@ void create_tiny(struct evhttp_request *req, void *arg)
 
     MAKE_SEED(seed);
 
-    char md_v[129];
+    char md_v[57];
     unsigned char md[1024];
-    memset(md_v, 0, 129);
-    SHA512((unsigned char*)seed.c_str(), seed.length(), md);
-    int n = 64;
+    memset(md_v, 0, 57);
+    SHA224((unsigned char*)seed.c_str(), seed.length(), md);
+    int n = 28;
     while (n--) {
-        snprintf(&md_v[126-2*n], 3, "%.2x", md[63-n]);
+        snprintf(&md_v[54-2*n], 3, "%.2x", md[27-n]);
     }
-    md_v[128] = 0;
+    md_v[56] = 0;
 
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
@@ -163,46 +163,75 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
 
 void query_tiny(struct evhttp_request *req, void *arg)
 {
-    // url : http://localhost:8888/query_tiny?name=xxxx
-    // ret : { "name" : "xxxxx", "tags" : [ "xxxx", "xxxx", .... ] }
+    // url : http://localhost:8888/query_tiny?deep=n&name=xxxx
+    // ret : { "head_name" : "xxxxxxxxxxxxxx",
+    //         "deep" : real_deep,
+    //         "message": [
+    //                      { "name" : "xxxxx", "tags" : [ "xxxx", "xxxx", .... ] },
+    //                      { "name" : "xxxxx", "tags" : [ "xxxx", "xxxx", .... ] },
+    //                      ......
+    //                    ]
+    //       }
     int deep = 1;
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
-    const char *value = NULL;
+    const char *val = NULL;
 
-    if ((value = evhttp_find_header(&res, "name")) != NULL) {
-        name = value;
+    if ((val = evhttp_find_header(&res, "name")) != NULL) {
+        name = val;
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
         LOG_DEBUG("[query tiny] recieved a query_tiny request WITHOUT name parameter");
         return;
     }
 
-    if ((value = evhttp_find_header(&res, "deep")) != NULL) {
-        deep = atoi(value);
+    if ((val = evhttp_find_header(&res, "deep")) != NULL) {
+        deep = atoi(val);
     }
 
-    std::map<std::string, Tiny>::iterator iter;
+    int deep_i;
+    std::set<std::string> layer_info;
+    std::set<std::string>::iterator layer_iter;
+    std::set<std::string> tags_set;
+    std::set<std::string>::iterator tags_iter;
+
+    Json::Value value;
+
+    value["head_name"] = name;
+    value["message"].resize(0);
 
     pthread_mutex_lock(&g_tiny_root_lock);
-    while (deep--) {
-        iter = g_tiny_root_master_p->find(name);
-        if (iter == g_tiny_root_master_p->end()) {
-            pthread_mutex_unlock(&g_tiny_root_lock);
-            evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
-            LOG_DEBUG("[query tiny] query a tiny, but not found it");
-            return;
+    //get all names of "deep" layers
+    layer_info.insert(name);
+    unsigned int deep_count = 0;
+    for (deep_i = 2; deep_i <= deep; deep_i++) {
+        for (layer_iter = layer_info.begin(); layer_iter != layer_info.end(); layer_iter++) {
+            std::map<std::string, Tiny>::iterator it;
+            it = g_tiny_root_master_p->find(*layer_iter);
+            if (it == g_tiny_root_master_p->end()) {
+                continue;
+            } else {
+                Json::Value item;
+                item[*layer_iter].resize(0);
+                for (tags_iter = it->second.tags.begin(); tags_iter != it->second.tags.end(); tags_iter++) {
+                    item[*layer_iter].append(*tags_iter);
+                    tags_set.insert(*tags_iter);
+                }
+                value["message"].append(item);
+            }
         }
+        if (tags_set.empty()) {
+            break;
+        }
+        deep_count++;
+        layer_info.clear();
+        layer_info = tags_set;
+        tags_set.clear();
     }
     pthread_mutex_unlock(&g_tiny_root_lock);
 
-    Tiny &tiny = iter->second;
-    Json::Value tags;
-    std::set<std::string>::iterator it;
-    for (it = tiny.tags.begin(); it != tiny.tags.end(); it++) {
-        tags.append(*it);
-    }
+    value["deep"] = deep_count;
 
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
@@ -211,13 +240,9 @@ void query_tiny(struct evhttp_request *req, void *arg)
         return;
     }
 
-    if (tags.empty()) {
-        evbuffer_add_printf(buf, "{\"name\":\"%s\",\"tags\":[]}", name.c_str());
-    } else {
-        Json::FastWriter writer;
-        writer.omitEndingLineFeed();
-        evbuffer_add_printf(buf, "{\"name\":\"%s\",\"tags\":%s}", name.c_str(), writer.write(tags).c_str());
-    }
+    Json::FastWriter writer;
+    writer.omitEndingLineFeed();
+    evbuffer_add_printf(buf, "%s", writer.write(value).c_str());
 
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 

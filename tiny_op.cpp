@@ -72,6 +72,7 @@ void control_handler(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/control?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
     evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    report_send("http://localhost:8888", "post data");
     return;
     std::string name = "";
     struct evkeyvalq res;
