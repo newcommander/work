@@ -93,9 +93,9 @@ void create_tiny(struct evhttp_request *req, void *arg)
     std::string seed = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
-    const char *value = NULL;
-    if ((value = evhttp_find_header(&res, "seed")) != NULL) {
-        seed = value;
+    const char *val = NULL;
+    if ((val = evhttp_find_header(&res, "seed")) != NULL) {
+        seed = val;
     }
 
     MAKE_SEED(seed);
@@ -110,13 +110,6 @@ void create_tiny(struct evhttp_request *req, void *arg)
     }
     md_v[56] = 0;
 
-    struct evbuffer *buf = evbuffer_new();
-    if (!buf) {
-        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[create tiny] evbuffer_new() failed");
-        return;
-    }
-
     Tiny *tiny = new Tiny();
     tiny->name = md_v;
     tiny->tags.clear();
@@ -129,7 +122,19 @@ void create_tiny(struct evhttp_request *req, void *arg)
 
     LOG_DEBUG("[create tiny] created a tiny success");
 
-    evbuffer_add_printf(buf, "{\"name\":\"%s\"}", md_v);
+    Json::Value value;
+    Json::FastWriter writer;
+    writer.omitEndingLineFeed();
+    value["name"] = md_v;
+
+    struct evbuffer *buf = evbuffer_new();
+    if (!buf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[create tiny] evbuffer_new() failed");
+        return;
+    }
+
+    evbuffer_add_printf(buf, "%s", writer.write(value).c_str());
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
@@ -144,7 +149,7 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
         name = value;
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
-        LOG_DEBUG("[destroy tiny] recieved a destroy_tiny request WITHOUT name parameter");
+        LOG_ERROR("[destroy tiny] recieved a destroy_tiny request WITHOUT name parameter");
         return;
     }
 
@@ -158,7 +163,15 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
     }
     pthread_mutex_unlock(&g_tiny_root_lock);
     
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    struct evbuffer *buf = evbuffer_new();
+    if (!buf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[destroy tiny] evbuffer_new() failed");
+        return;
+    }
+
+    evbuffer_add_printf(buf, "{}");
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
 void query_tiny(struct evhttp_request *req, void *arg)
@@ -182,7 +195,7 @@ void query_tiny(struct evhttp_request *req, void *arg)
         name = val;
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
-        LOG_DEBUG("[query tiny] recieved a query_tiny request WITHOUT name parameter");
+        LOG_ERROR("[query tiny] recieved a query_tiny request WITHOUT name parameter");
         return;
     }
 
@@ -261,7 +274,7 @@ void add_tags(struct evhttp_request *req, void *arg)
         name = val;
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
-        LOG_DEBUG("[add tags] recieved a add_tags request WITHOUT name parameter");
+        LOG_ERROR("[add tags] recieved a add_tags request WITHOUT name parameter");
         return;
     }
 
@@ -272,7 +285,7 @@ void add_tags(struct evhttp_request *req, void *arg)
     if (it == g_tiny_root_master_p->end()) {
         pthread_mutex_unlock(&g_tiny_root_lock);
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
-        LOG_DEBUG("[add tags] add tags into a tiny, but not found this tiny");
+        LOG_ERROR("[add tags] add tags into a tiny, but not found this tiny");
         return;
     }
     pthread_mutex_unlock(&g_tiny_root_lock);
@@ -283,7 +296,7 @@ void add_tags(struct evhttp_request *req, void *arg)
     struct evbuffer *evbuf = evhttp_request_get_input_buffer(req);
     if (!evbuf || (len = evbuffer_get_length(evbuf)) == 0) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[add tags] no input data(tags) found");
+        LOG_ERROR("[add tags] no input data(tags) found");
         return;
     }
 
@@ -294,19 +307,19 @@ void add_tags(struct evhttp_request *req, void *arg)
     Json::Reader reader;
     if (!reader.parse(buf, value)) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[add tags] parse input data to json format failed");
+        LOG_ERROR("[add tags] parse input data to json format failed");
         return;
     }
 
     if (!value.isMember("tags")) {
         evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
-        LOG_DEBUG("[add tags] there's no \"tags\" json item within the input data");
+        LOG_ERROR("[add tags] there's no \"tags\" json item within the input data");
         return;
     }
 
     if (!value["tags"].isArray()) {
         evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
-        LOG_DEBUG("[add tags] the tags item is not an array");
+        LOG_ERROR("[add tags] the tags item is not an array");
         return;
     }
 
@@ -320,7 +333,16 @@ void add_tags(struct evhttp_request *req, void *arg)
         tiny.tags.insert(temp.asString());
         LOG_DEBUG("[add tags] add a tag into a tiny success");
     }
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+
+    struct evbuffer *rebuf = evbuffer_new();
+    if (!rebuf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[add tags] evbuffer_new() failed");
+        return;
+    }
+
+    evbuffer_add_printf(rebuf, "{}");
+    evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
 }
 
 void del_tags(struct evhttp_request *req, void *arg)
@@ -334,7 +356,7 @@ void del_tags(struct evhttp_request *req, void *arg)
         name = val;
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
-        LOG_DEBUG("[del tags] recieved a del_tags request WITHOUT name parameter");
+        LOG_ERROR("[del tags] recieved a del_tags request WITHOUT name parameter");
         return;
     }
 
@@ -345,7 +367,7 @@ void del_tags(struct evhttp_request *req, void *arg)
     if (it == g_tiny_root_master_p->end()) {
         pthread_mutex_unlock(&g_tiny_root_lock);
         evhttp_send_reply(req, HTTP_NOTFOUND, "could not find the tiny", NULL);
-        LOG_DEBUG("[del tags] delete tags of a tiny, but not found this tiny");
+        LOG_ERROR("[del tags] delete tags of a tiny, but not found this tiny");
         return;
     }
     pthread_mutex_unlock(&g_tiny_root_lock);
@@ -356,7 +378,7 @@ void del_tags(struct evhttp_request *req, void *arg)
     struct evbuffer *evbuf = evhttp_request_get_input_buffer(req);
     if (!evbuf || (len = evbuffer_get_length(evbuf)) == 0) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[del tags] no input data(tags) found");
+        LOG_ERROR("[del tags] no input data(tags) found");
         return;
     }
 
@@ -367,19 +389,19 @@ void del_tags(struct evhttp_request *req, void *arg)
     Json::Reader reader;
     if (!reader.parse(buf, value)) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[del tags] parse input data to json format failed");
+        LOG_ERROR("[del tags] parse input data to json format failed");
         return;
     }
 
     if (!value.isMember("tags")) {
         evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
-        LOG_DEBUG("[del tags] there's no \"tags\" json item within the input data");
+        LOG_ERROR("[del tags] there's no \"tags\" json item within the input data");
         return;
     }
 
     if (!value["tags"].isArray()) {
         evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
-        LOG_DEBUG("[del tags] the tags item is not an array");
+        LOG_ERROR("[del tags] the tags item is not an array");
         return;
     }
 
@@ -394,7 +416,15 @@ void del_tags(struct evhttp_request *req, void *arg)
         LOG_DEBUG("[del tags] delete a tag from a tiny success");
     }
 
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    struct evbuffer *rebuf = evbuffer_new();
+    if (!rebuf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[del tags] evbuffer_new() failed");
+        return;
+    }
+
+    evbuffer_add_printf(rebuf, "{}");
+    evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
 }
 
 void statistic_handler(struct evhttp_request *req, void *arg)
@@ -402,13 +432,18 @@ void statistic_handler(struct evhttp_request *req, void *arg)
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[statistic handler] evbuffer_new failed");
+        LOG_ERROR("[statistic handler] evbuffer_new failed");
         return;
     }
 
+    Json::Value value;
+    Json::FastWriter writer;
+    writer.omitEndingLineFeed();
+    value["master root count"] = (unsigned int)g_tiny_root_master_p->size();
+    value["slaver root count"] = (unsigned int)g_tiny_root_slaver_p->size();
+
     pthread_mutex_lock(&g_tiny_root_lock);
-    evbuffer_add_printf(buf, "master root count: %ld\n", g_tiny_root_master_p->size());
-    evbuffer_add_printf(buf, "slaver root count: %ld\n", g_tiny_root_slaver_p->size());
+    evbuffer_add_printf(buf, "%s", writer.write(value).c_str());
     pthread_mutex_unlock(&g_tiny_root_lock);
 
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
@@ -416,8 +451,6 @@ void statistic_handler(struct evhttp_request *req, void *arg)
 
 void dump_handler(struct evhttp_request *req, void *arg)
 {
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
-
     Json::Value value;
     std::map<std::string, Tiny>::iterator it;
     std::set<std::string>::iterator iter;
@@ -442,29 +475,39 @@ void dump_handler(struct evhttp_request *req, void *arg)
     fwrite(writer.write(value).c_str(), writer.write(value).size(), 1, fd);
     fclose(fd);
 
-    LOG_INFO("[dump handler] dump tiny success");
+    LOG_DEBUG("[dump handler] dump tiny success");
+
+    struct evbuffer *buf = evbuffer_new();
+    if (!buf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[dump handler] evbuffer_new() failed");
+        return;
+    }
+
+    evbuffer_add_printf(buf, "{}");
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
 void load_handler(struct evhttp_request *req, void *arg)
 {
     struct stat sb;
     if (stat("log/dump", &sb) == -1) {
-        LOG_ERROR("[load handler] stat log/dump failed, cannot load it");
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] stat log/dump failed, cannot load it");
         return;
     }
 
     char *buf = (char*)calloc(1, sb.st_size+1);
     if (!buf) {
-        LOG_ERROR("[load handler] calloc(size: %ld) failed, cannot load it", sb.st_size+1);
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] calloc(size: %ld) failed, cannot load it", sb.st_size+1);
         return;
     }
 
     FILE *fd = fopen("log/dump", "r");
     if (!fd) {
-        LOG_ERROR("[load handler] fopen log/dump failed: %s", strerror(errno));
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] fopen log/dump failed: %s", strerror(errno));
         free(buf);
         return;
     }
@@ -473,8 +516,8 @@ void load_handler(struct evhttp_request *req, void *arg)
     off_t ret = 0;
     while (1) {
         if (time(NULL) - start_point > 10) {
-            LOG_ERROR("[load handler] load failed, timeout");
             evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+            LOG_ERROR("[load handler] load failed, timeout");
             fclose(fd);
             free(buf);
             return;
@@ -488,8 +531,8 @@ void load_handler(struct evhttp_request *req, void *arg)
     Json::Value value;
     Json::Reader reader;
     if (!reader.parse(buf, value)) {
-        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
         LOG_ERROR("[load handler] json pares failed");
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
         return;
     }
     free(buf);
@@ -535,8 +578,16 @@ void load_handler(struct evhttp_request *req, void *arg)
     g_tiny_root_slaver_p->clear();
     pthread_mutex_unlock(&g_tiny_root_lock);
 
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
-    LOG_INFO("[load handler] load tiny success");
+    LOG_DEBUG("[load handler] load tiny success");
+
+    struct evbuffer *rebuf = evbuffer_new();
+    if (!rebuf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[load handler] evbuffer_new() failed");
+        return;
+    }
+    evbuffer_add_printf(rebuf, "{}");
+    evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
 }
 
 void *dispatch(void *arg)
@@ -654,7 +705,7 @@ int main(int argc, char **argv)
         }
     }
 
-    my_log_init(".", "log/hash.log", "log/hash.log.we", 16);
+    my_log_init(".", "log/tiny_op.log", "log/tiny_op.log.we", 16);
 
     if (port <= 1024) {
         LOG_ERROR("Invalid port number: %d, should >1024", port);

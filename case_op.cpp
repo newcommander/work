@@ -19,6 +19,18 @@
 std::vector<pthread_t> g_threads;
 CURL *g_url;
 char g_curl_errbuf[CURL_ERROR_SIZE];
+pthread_mutex_t g_recv_lock = PTHREAD_MUTEX_INITIALIZER;
+std::string g_recv_buf = "";
+
+static size_t recv_data(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    if (buffer) {
+        pthread_mutex_lock(&g_recv_lock);
+        g_recv_buf += (char*)buffer;
+        pthread_mutex_unlock(&g_recv_lock);
+    }
+    return size * nmemb;
+}
 
 static int report_init()
 {
@@ -36,6 +48,7 @@ static int report_init()
     curl_easy_setopt(g_url, CURLOPT_TIMEOUT, 5L);
     curl_easy_setopt(g_url, CURLOPT_USERAGENT, "tiny/op");
     curl_easy_setopt(g_url, CURLOPT_ERRORBUFFER, g_curl_errbuf);
+    curl_easy_setopt(g_url, CURLOPT_WRITEFUNCTION, recv_data);
 
     return 0;
 }
@@ -68,67 +81,69 @@ static int report_clean()
     return 0;
 }
 
-void control_handler(struct evhttp_request *req, void *arg)
+static Json::Value do_query(std::string uri, std::string post_data)
 {
-    // url : http://localhost:8888/control?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
-    report_send("http://localhost:8888", "post data");
-    return;
-    std::string name = "";
-    struct evkeyvalq res;
-    evhttp_parse_query(req->uri, &res);
-    const char *val = NULL;
-    if ((val = evhttp_find_header(&res, "name")) != NULL) {
-        name = val;
-    } else {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
-        LOG_DEBUG("[control handler] recieved a del_tags request WITHOUT name parameter");
-        return;
-    }
-
-    size_t len = 0;
-    struct evbuffer *evbuf = evhttp_request_get_input_buffer(req);
-    if (!evbuf || (len = evbuffer_get_length(evbuf)) == 0) {
-        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[control handler] no input data(tags) found");
-        return;
-    }
-
-    char *buf = (char*)calloc(len+1, sizeof(size_t));
-    evbuffer_remove(evbuf, buf, len);
-
     Json::Value value;
     Json::Reader reader;
-    if (!reader.parse(buf, value)) {
-        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
-        LOG_DEBUG("[control handler] parse input data to json format failed");
-        return;
+    std::string url = "http://localhost:8888/";
+
+    int status = report_send(url + uri, post_data);
+    if (status != CURLE_OK) {
+        LOG_ERROR("[do query] request failed, ret code: %d", status);
+        return value;
     }
 
-    if (!value.isMember("tags")) {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
-        LOG_DEBUG("[control handler] there's no \"tags\" json item within the input data");
-        return;
-    }
+    time_t timeout = 10;
+    time_t start_time = time(NULL);
+    while (1) {
+        if ((time(NULL) - start_time) > timeout) {
+            break;
+        }
 
-    if (!value["tags"].isArray()) {
-        evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
-        LOG_DEBUG("[control handler] the tags item is not an array");
-        return;
-    }
-
-    unsigned int tags_count = value["tags"].size();
-    Json::Value empty;
-    while (tags_count--) {
-        Json::Value temp = value["tags"].get(tags_count, empty);
-        if (temp.empty()) {
+        pthread_mutex_lock(&g_recv_lock);
+        if (!reader.parse(g_recv_buf, value)) {
+            pthread_mutex_unlock(&g_recv_lock);
             continue;
         }
-        //tiny.tags.erase(temp.asString());
-        LOG_DEBUG("[control handler] delete a tag from a tiny success");
+        pthread_mutex_unlock(&g_recv_lock);
+        break;
+    }
+    g_recv_buf = "";
+
+    return value;
+}
+
+static int do_logic()
+{
+    Json::Value value;
+    value = do_query("create_tiny?seed=srog", "");
+    if (!value.isMember("name")) {
+        LOG_ERROR("[do_logic] request for create_tiny failed, no \"name\" return");
+        return 1;
+    }
+    if (!value["name"].isString()) {
+        LOG_ERROR("[do_logic] request for create_tiny failed, item \"name\" is not a string");
+        return 1;
+    }
+    return 0;
+}
+
+void control_handler(struct evhttp_request *req, void *arg)
+{
+    struct evbuffer *rebuf = evbuffer_new();
+    if (!rebuf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
+        LOG_ERROR("[control handler] evbuffer_new() failed");
+        return;
     }
 
-    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    if (do_logic() != 0) {
+        evbuffer_add_printf(rebuf, "failed\n");
+        evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
+    } else {
+        evbuffer_add_printf(rebuf, "success\n");
+        evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
+    }
 }
 
 void *dispatch(void *arg)
@@ -258,7 +273,7 @@ int main(int argc, char **argv)
         }
     }
 
-    my_log_init(".", "log/tiny_op.log", "log/tiny_op.log.we", 16);
+    my_log_init(".", "log/case_op.log", "log/case_op.log.we", 16);
 
     if (port <= 1024) {
         LOG_ERROR("Invalid port number: %d, should >1024", port);

@@ -1,0 +1,95 @@
+#! /bin/sh
+
+help() {
+    echo "${0} < start | stop | restart | status >"
+    exit 1
+}
+
+ok() {
+    echo "[OK] ${1}"
+}
+
+failed() {
+    echo "[FAILED] ${1}"
+    exit 1
+}
+
+check() {
+    pgrep tiny_op >/dev/null &&
+    pgrep case_op >/dev/null
+    return $?
+}
+
+signal() {
+    pgrep tiny_op | xargs kill
+    pgrep case_op | xargs kill
+}
+
+start() {
+    check
+    if [ $? -eq 0 ]; then
+        ok "Running"
+        return 0
+    fi
+
+    (./tiny_op -p 8888 &)
+    (./case_op -p 8887 &)
+    sleep 1
+    check || failed "start"
+    ok "start"
+    return 0
+}
+
+stop() {
+    check
+    if [ $? -ne 0 ]; then
+        ok "Not Running"
+        return 0
+    fi
+
+    for i in 1 2 3 4 5; do
+        signal
+        sleep 1
+        check
+        if [ $? -ne 0 ]; then
+            ok "stop"
+            return 0
+        fi
+    done
+    failed "stop"
+}
+
+restart() {
+    stop
+    start
+    return 0
+}
+
+status() {
+    check
+    if [ $? -eq 0 ]; then
+        echo 'Running'
+        return 0
+    else
+        echo 'Not Running'
+        return 1
+    fi
+}
+
+case "${1}" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        restart
+        ;;
+    status)
+        status
+        ;;
+    *)
+        help
+        ;;
+esac
