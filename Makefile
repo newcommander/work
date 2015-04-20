@@ -3,7 +3,7 @@ CC=g++
 WORKROOT=..
 THIRD=$(WORKROOT)/thirdparty/output
 
-TARGET=hash tiny_op
+TARGET=tiny_op case_op
 
 LIBEVENT=$(THIRD)/libevent
 LIBCURL=$(THIRD)/libcurl
@@ -41,10 +41,10 @@ all: $(TARGET)
 clean:
 	rm -rf *.o $(TARGET) log
 
-hash: hash.o
+tiny_op: tiny_op.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
 
-tiny_op: tiny_op.o
+case_op: case_op.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
 
 %.o	: %.cpp
