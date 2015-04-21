@@ -88,44 +88,55 @@ int prepar_socket(int port, int backlog)
 
 void create_tiny(struct evhttp_request *req, void *arg)
 {
-    // url : http://localhost:8888/create_tiny?seed=xxxx
-    // ret : { "name" : "xxxxxxxxxxxxxxxxxxxxxxxxxx" }
+    // url : http://localhost:8888/create_tiny?num=n&seed=xxxx
+    // ret : { "names" : ["xxxx", "xxxx", "xxxx"] }
+    Json::Value value;
     std::string seed = "";
+    unsigned int num = 1;
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
     const char *val = NULL;
     if ((val = evhttp_find_header(&res, "seed")) != NULL) {
         seed = val;
     }
-
-    MAKE_SEED(seed);
+    if ((val = evhttp_find_header(&res, "num")) != NULL) {
+        num = atoi(val);
+    }
 
     char md_v[57];
     unsigned char md[1024];
-    memset(md_v, 0, 57);
-    SHA224((unsigned char*)seed.c_str(), seed.length(), md);
-    int n = 28;
-    while (n--) {
-        snprintf(&md_v[54-2*n], 3, "%.2x", md[27-n]);
+    int n;
+
+    value["names"].resize(0);
+
+    while (num--) {
+        memset(md_v, 0, 57);
+
+        MAKE_SEED(seed);
+        SHA224((unsigned char*)seed.c_str(), seed.length(), md);
+
+        n = 28;
+        while (n--) {
+            snprintf(&md_v[54-2*n], 3, "%.2x", md[27-n]);
+        }
+        md_v[56] = 0;
+
+        Tiny *tiny = new Tiny();
+        tiny->name = md_v;
+        tiny->tags.clear();
+
+        pthread_mutex_lock(&g_tiny_root_lock);
+        g_tiny_root_master_p->insert(std::map<std::string, Tiny>::value_type(tiny->name, *tiny));
+        pthread_mutex_unlock(&g_tiny_root_lock);
+
+        value["names"].append(md_v);
+        delete tiny;
     }
-    md_v[56] = 0;
 
-    Tiny *tiny = new Tiny();
-    tiny->name = md_v;
-    tiny->tags.clear();
+    LOG_DEBUG("[create tiny] created %ld tiny success", value["names"].size());
 
-    pthread_mutex_lock(&g_tiny_root_lock);
-    g_tiny_root_master_p->insert(std::map<std::string, Tiny>::value_type(tiny->name, *tiny));
-    pthread_mutex_unlock(&g_tiny_root_lock);
-
-    delete tiny;
-
-    LOG_DEBUG("[create tiny] created a tiny success");
-
-    Json::Value value;
     Json::FastWriter writer;
     writer.omitEndingLineFeed();
-    value["name"] = md_v;
 
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
@@ -141,6 +152,7 @@ void create_tiny(struct evhttp_request *req, void *arg)
 void destroy_tiny(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/destroy_tiny?name=xxxx
+    // ret : {}
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -176,8 +188,8 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
 
 void query_tiny(struct evhttp_request *req, void *arg)
 {
-    // url : http://localhost:8888/query_tiny?deep=n&name=xxxx
-    // ret : { "head_name" : "xxxxxxxxxxxxxx",
+    // url : http://localhost:8888/query_tiny?deep=n&head=xxxx
+    // ret : { "head" : "xxxxxxxxxxxxxx",
     //         "deep" : real_deep,
     //         "message": [
     //                      { "name" : "xxxxx", "tags" : [ "xxxx", "xxxx", .... ] },
@@ -191,7 +203,7 @@ void query_tiny(struct evhttp_request *req, void *arg)
     evhttp_parse_query(req->uri, &res);
     const char *val = NULL;
 
-    if ((val = evhttp_find_header(&res, "name")) != NULL) {
+    if ((val = evhttp_find_header(&res, "head")) != NULL) {
         name = val;
     } else {
         evhttp_send_reply(req, HTTP_BADREQUEST, "invalid http request was made", NULL);
@@ -211,7 +223,7 @@ void query_tiny(struct evhttp_request *req, void *arg)
 
     Json::Value value;
 
-    value["head_name"] = name;
+    value["head"] = name;
     value["message"].resize(0);
 
     pthread_mutex_lock(&g_tiny_root_lock);
@@ -259,12 +271,13 @@ void query_tiny(struct evhttp_request *req, void *arg)
 
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 
-    LOG_DEBUG("[query tiny] queried a tiny success");
+    LOG_DEBUG("[query tiny] queried a tiny with %d deep success", deep_count);
 }
 
 void add_tags(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/add_tags?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
+    // ret : {}
     std::string name = "";
     struct evkeyvalq res;
 
@@ -348,6 +361,7 @@ void add_tags(struct evhttp_request *req, void *arg)
 void del_tags(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/del_tags?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
+    // ret : {}
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -429,6 +443,8 @@ void del_tags(struct evhttp_request *req, void *arg)
 
 void statistic_handler(struct evhttp_request *req, void *arg)
 {
+    // url : http://localhost:8888/statistic
+    // ret : { "master root count" : n, "slaver root count" : m }
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
@@ -451,6 +467,8 @@ void statistic_handler(struct evhttp_request *req, void *arg)
 
 void dump_handler(struct evhttp_request *req, void *arg)
 {
+    // url : http://localhost:8888/dump
+    // ret : {}
     Json::Value value;
     std::map<std::string, Tiny>::iterator it;
     std::set<std::string>::iterator iter;
@@ -490,6 +508,8 @@ void dump_handler(struct evhttp_request *req, void *arg)
 
 void load_handler(struct evhttp_request *req, void *arg)
 {
+    // url : http://localhost:8888/load
+    // ret : {}
     struct stat sb;
     if (stat("log/dump", &sb) == -1) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);

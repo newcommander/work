@@ -117,12 +117,16 @@ static int do_logic()
 {
     Json::Value value;
     value = do_query("create_tiny?seed=srog", "");
-    if (!value.isMember("name")) {
-        LOG_ERROR("[do_logic] request for create_tiny failed, no \"name\" return");
+    if (!value.isMember("names")) {
+        LOG_ERROR("[do_logic] request for create_tiny failed, no \"names\" return");
         return 1;
     }
-    if (!value["name"].isString()) {
-        LOG_ERROR("[do_logic] request for create_tiny failed, item \"name\" is not a string");
+    if (!value["names"].isArray()) {
+        LOG_ERROR("[do_logic] request for create_tiny failed, item \"names\" is not a string");
+        return 1;
+    }
+    if (value["names"].size() == 0) {
+        LOG_ERROR("[do_logic] request for create_tiny failed, array \"names\" has no item");
         return 1;
     }
     return 0;
