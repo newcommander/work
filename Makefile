@@ -44,7 +44,7 @@ clean:
 tiny_op: tiny_op.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
 
-case_op: case_op.o
+case_op: case_op.o logic.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
 
 %.o	: %.cpp
