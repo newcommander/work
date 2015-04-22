@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include "logic.h"
 
 CURL *g_url;
@@ -131,23 +130,33 @@ int new_link(std::string name, std::string tag)
     return 0;
 }
 
+Json::Value new_tiny(std::string num)
+{
+    Json::Value value;
+    Json::Value empty;
+    std::string seed = "sogheirgjir";
+
+    value = do_query("create_tiny?num=" + num + "seed=" + seed, "");
+    if (!value.isMember("names")) {
+        LOG_ERROR("[new_tiny] request for create_tiny failed, no \"names\" return");
+        return empty;
+    }
+    if (!value["names"].isArray()) {
+        LOG_ERROR("[new_tiny] request for create_tiny failed, item \"names\" is not a array");
+        return empty;
+    }
+    if (value["names"].size() == 0) {
+        LOG_ERROR("[new_tiny] request for create_tiny failed, array \"names\" has no item");
+        return empty;
+    }
+
+    return value;
+}
+
 int do_logic()
 {
     Json::Value value;
-    value = do_query("create_tiny?num=9seed=srog", "");
-    if (!value.isMember("names")) {
-        LOG_ERROR("[do_logic] request for create_tiny failed, no \"names\" return");
-        return 1;
-    }
-    if (!value["names"].isArray()) {
-        LOG_ERROR("[do_logic] request for create_tiny failed, item \"names\" is not a array");
-        return 1;
-    }
-    if (value["names"].size() == 0) {
-        LOG_ERROR("[do_logic] request for create_tiny failed, array \"names\" has no item");
-        return 1;
-    }
-
+    value = new_tiny("9");
     unsigned int num = value["names"].size();
     unsigned int i;
     Json::Value empty;
