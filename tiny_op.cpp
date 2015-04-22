@@ -152,7 +152,7 @@ void create_tiny(struct evhttp_request *req, void *arg)
 void destroy_tiny(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/destroy_tiny?name=xxxx
-    // ret : {}
+    // ret : { "status" : 0/1 }
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -182,7 +182,7 @@ void destroy_tiny(struct evhttp_request *req, void *arg)
         return;
     }
 
-    evbuffer_add_printf(buf, "{}");
+    evbuffer_add_printf(buf, "{\"status\":0}");
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
@@ -277,7 +277,7 @@ void query_tiny(struct evhttp_request *req, void *arg)
 void add_tags(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/add_tags?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
-    // ret : {}
+    // ret : { "status" : 0\1 }
     std::string name = "";
     struct evkeyvalq res;
 
@@ -354,14 +354,14 @@ void add_tags(struct evhttp_request *req, void *arg)
         return;
     }
 
-    evbuffer_add_printf(rebuf, "{}");
+    evbuffer_add_printf(rebuf, "{\"status\":0}");
     evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
 }
 
 void del_tags(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/del_tags?name=xxxx -d '{ "tags" : [ "xxxx", "xxxx", .... ] }'
-    // ret : {}
+    // ret : { "status" : 0/1 }
     std::string name = "";
     struct evkeyvalq res;
     evhttp_parse_query(req->uri, &res);
@@ -437,7 +437,7 @@ void del_tags(struct evhttp_request *req, void *arg)
         return;
     }
 
-    evbuffer_add_printf(rebuf, "{}");
+    evbuffer_add_printf(rebuf, "{\"status\":0}");
     evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
 }
 
@@ -468,7 +468,7 @@ void statistic_handler(struct evhttp_request *req, void *arg)
 void dump_handler(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/dump
-    // ret : {}
+    // ret : { "status" : 0/1 }
     Json::Value value;
     std::map<std::string, Tiny>::iterator it;
     std::set<std::string>::iterator iter;
@@ -502,14 +502,14 @@ void dump_handler(struct evhttp_request *req, void *arg)
         return;
     }
 
-    evbuffer_add_printf(buf, "{}");
+    evbuffer_add_printf(buf, "{\"status\":0}");
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
 }
 
 void load_handler(struct evhttp_request *req, void *arg)
 {
     // url : http://localhost:8888/load
-    // ret : {}
+    // ret : { "status" : 0/1 }
     struct stat sb;
     if (stat("log/dump", &sb) == -1) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
@@ -606,7 +606,7 @@ void load_handler(struct evhttp_request *req, void *arg)
         LOG_ERROR("[load handler] evbuffer_new() failed");
         return;
     }
-    evbuffer_add_printf(rebuf, "{}");
+    evbuffer_add_printf(rebuf, "{\"status\":0}");
     evhttp_send_reply(req, HTTP_OK, "OK", rebuf);
 }
 
