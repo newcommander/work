@@ -16,13 +16,15 @@ failed() {
 
 check() {
     pgrep tiny_op >/dev/null &&
-    pgrep case_op >/dev/null
+    pgrep case_op >/dev/null &&
+    pgrep reference >/dev/null
     return $?
 }
 
 signal() {
     pgrep tiny_op | xargs kill
     pgrep case_op | xargs kill
+    pgrep reference | xargs kill
 }
 
 start() {
@@ -32,8 +34,9 @@ start() {
         return 0
     fi
 
-    (./tiny_op -p 8888 &)
-    (./case_op -p 8887 &)
+    (./tiny_op -p 8888 </dev/null >/dev/null 2>&1 &)
+    (./case_op -p 8887 </dev/null >/dev/null 2>&1 &)
+    (./reference -p 8886 </dev/null >/dev/null 2>&1 &)
     sleep 1
     check || failed "start"
     ok "start"

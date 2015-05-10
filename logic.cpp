@@ -1,10 +1,9 @@
 #include "logic.h"
 
-CURL *g_url;
-char g_curl_errbuf[CURL_ERROR_SIZE];
-pthread_mutex_t g_recv_lock = PTHREAD_MUTEX_INITIALIZER;
-std::string g_recv_buf = "";
-std::set<std::string> g_perceptron;
+static pthread_mutex_t g_recv_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_curl_errbuf[CURL_ERROR_SIZE];
+static std::string g_recv_buf = "";
+static CURL *g_url;
 
 static size_t recv_data(void *buffer, size_t size, size_t nmemb, void *userp)
 {
@@ -99,6 +98,7 @@ static Json::Value do_query(std::string uri, std::string post_data)
         pthread_mutex_unlock(&g_recv_lock);
         break;
     }
+
     g_recv_buf = "";
 
     return value;

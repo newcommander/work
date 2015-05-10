@@ -6,7 +6,6 @@
 #include <fcntl.h>
 #include <stdio.h>
 
-#include "event2/event.h"
 #include "json/json.h"
 #include "evhttp.h"
 #include "mylog.h"
@@ -149,13 +148,13 @@ int main(int argc, char **argv)
     struct stat sb;
     if (stat("log", &sb) == -1) {
         if (mkdir("log", 0755) < 0) {
-            printf("mkdir log failed\n");
+            fprintf(stderr, "mkdir log failed\n");
             return 1;
         }
     } else {
         if ((sb.st_mode & S_IFMT) != S_IFDIR) {
             if (unlink("log") != 0) {
-                printf("I need ./log to be a directory, but it does not, and rm failed");
+                fprintf(stderr, "I need ./log to be a directory, but it does not, and rm failed");
                 return 1;
             }
         }

@@ -5,12 +5,10 @@
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
-#include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <time.h>
 
-#include "event2/event.h"
 #include "openssl/sha.h"
 #include "json/json.h"
 #include "evhttp.h"
@@ -404,8 +402,10 @@ void del_tags(struct evhttp_request *req, void *arg)
     if (!reader.parse(buf, value)) {
         evhttp_send_reply(req, HTTP_INTERNAL, "internal error", NULL);
         LOG_ERROR("[del tags] parse input data to json format failed");
+        free(buf);
         return;
     }
+    free(buf);
 
     if (!value.isMember("tags")) {
         evhttp_send_reply(req, HTTP_BADREQUEST, "post data format error", NULL);
@@ -713,13 +713,13 @@ int main(int argc, char **argv)
     struct stat sb;
     if (stat("log", &sb) == -1) {
         if (mkdir("log", 0755) < 0) {
-            printf("mkdir log failed\n");
+            fprintf(stderr, "mkdir log failed\n");
             return 1;
         }
     } else {
         if ((sb.st_mode & S_IFMT) != S_IFDIR) {
             if (unlink("log") != 0) {
-                printf("I need ./log to be a directory, but it dose not, and rm failed");
+                fprintf(stderr, "I need ./log to be a directory, but it dose not, and rm failed");
                 return 1;
             }
         }

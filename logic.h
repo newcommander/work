@@ -13,6 +13,10 @@ int report_init();
 
 int report_clean();
 
+int new_link(std::string name, std::string tag);
+
+Json::Value new_tiny(std::string num);
+
 int do_logic();
 
 #endif //LOGIC_H
