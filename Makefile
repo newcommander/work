@@ -33,9 +33,9 @@ LIBS=-L$(LIBEVENT)/lib \
 	 -L$(ZLIB)/lib
 
 LDFLAGS=-Wl,--dn -levent -lmylog -pthread -lcurl -lidn -lssl -lcrypto \
-		-ljsoncpp -lswresample -lavdevice -lavfilter -lswscale \
+		-ljsoncpp -lswresample -lavdevice -lavfilter -lswscale -lSDL \
 		-lavformat -lavcodec -lswresample -lavutil -lz \
-		-Wl,--dy -lrt -ldl -lxcb-shape -lxcb-shm -lxcb-xfixes
+		-Wl,--dy -lrt -ldl -lxcb-shape -lxcb-shm -lxcb-xfixes -lasound
 
 CFLAGS=-fPIC -g -finline-functions -Wall -Werror
 
