@@ -55,7 +55,7 @@ case_op: case_op.o logic.o
 reference: reference.o logic.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
 
-decoder: decoder.o
+decoder: decoder.o net.cpp
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
 
 %.o	: %.cpp

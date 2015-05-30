@@ -2,6 +2,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <string.h>
@@ -16,6 +17,7 @@ extern "C" {
 #define __STDC_CONSTANT_MACROS
 #include "libavformat/avformat.h"
 #include "libavdevice/avdevice.h"
+#include "libavutil/imgutils.h"
 #include "libavformat/avio.h"
 }
 #include "json/json.h"
@@ -40,6 +42,7 @@ struct deque_info {
     enum AVMediaType media_type;
     pthread_t receiving_thread;
     pthread_t decoding_thread;
+    AVFormatContext *fmt_ctx;
     pthread_mutex_t mutex;
     int stream_index;
 };
@@ -49,8 +52,65 @@ struct child_info {
     int pid;
 };
 
-static std::vector<struct child_info> _s_child_processes;  // for global process
-static AVFormatContext *_s_fmt_ctx = NULL;  // for each child process
+/*
+extern int show_init(char *ip, int port, int *screen_width, int *screen_height);
+extern int show(int sockfd, unsigned char *buf);
+extern int show_end(int sockfd);
+
+void test_image(uint8_t **data, int *linesize, int width, int height)
+{
+    uint8_t *data_y = data[0];
+    uint8_t *data_u = data[1];
+    uint8_t *data_v = data[2];
+    int size_y = linesize[0];
+    int size_u = linesize[1];
+    int size_v = linesize[2];
+    int len = width * height;
+    int screen_height = 0;
+    int screen_width = 0;
+
+    unsigned char *buf = (unsigned char*)calloc(4 + len * 7, 1);
+    if (!buf) {
+        printf("calloc failed\n");
+        return;
+    }
+
+    std::string ip = "192.168.1.2";
+    int fd = show_init((char*)(ip.c_str()), 19900, &screen_width, &screen_height);
+    if (fd < 0) {
+        printf("show_init failed\n");
+        free(buf);
+        return;
+    }
+
+    buf[0] = len & 0xff;
+    buf[1] = ( len >> 8 ) & 0xff;
+    buf[2] = ( len >> 16 ) & 0xff;
+    buf[3] = ( len >> 24 ) & 0xff;
+
+    int h = 0, w = 0;
+    unsigned char *p = &buf[4];
+    unsigned char *c = &buf[4 + len * 4];
+    for (h = 0; h < height; h++) {
+        for (w = 0; w < width; w++) {
+            p[(h * width + w) * 4 + 0] = (unsigned char)(w & 0xff);
+            p[(h * width + w) * 4 + 1] = (unsigned char)((w >> 8) & 0xff);
+            p[(h * width + w) * 4 + 2] = (unsigned char)(h & 0xff);
+            p[(h * width + w) * 4 + 3] = (unsigned char)((h >> 8) & 0xff);
+            float y = (float)data_y[h * size_y + w];
+            float u = (float)data_u[(h / 2) * size_u + w / 2];
+            float v = (float)data_v[(h / 2) * size_v + w / 2];
+            c[(h * width + w) * 3 + 0] = (unsigned char)(y + 1.4075 * (v - 128));
+            c[(h * width + w) * 3 + 1] = (unsigned char)(y - 0.3455 * (u - 128) - 0.7169 * (v - 128));
+            c[(h * width + w) * 3 + 2] = (unsigned char)(y + 1.779 * (u - 128));
+        }
+    }
+    show(fd, buf);
+
+    free(buf);
+    show_end(fd);
+}
+*/
 
 int insert_pkt(std::deque<AVPacket> &queue, AVPacket *pkt, pthread_mutex_t *mutex)
 {
@@ -60,7 +120,7 @@ int insert_pkt(std::deque<AVPacket> &queue, AVPacket *pkt, pthread_mutex_t *mute
 
     pthread_mutex_lock(mutex);
     if (queue.size() >= DEQUE_MAX_SIZE) {
-        LOG_ERROR("[insert_pkt] insert failed, deque full");
+        LOG_WARN("insert failed, deque full");  // TODO: for which file ?
         pthread_mutex_unlock(mutex);
         return -1;
     }
@@ -88,27 +148,23 @@ void pick_pkt(std::deque<AVPacket> &queue, AVPacket *pkt, pthread_mutex_t *mutex
     pthread_mutex_unlock(mutex);
 }
 
-void decoding_thread_clean(void *arg)
-{
-    struct deque_info *info = (struct deque_info*)arg;
-    pthread_cancel(info->receiving_thread);
-    LOG_INFO("[decoding_thread_clean] decoding thread exit, for %s stream in file %s",
-            av_get_media_type_string(info->media_type), _s_fmt_ctx->filename);
-}
-
 void receiving_thread_clean(void *arg)
 {
+    if (!arg) {
+        return;
+    }
+
     struct deque_info *info = (struct deque_info*)arg;
-    pthread_cancel(info->decoding_thread);
-    LOG_INFO("[receiving_thread_clean] receiving thread exit, for %s stream in file %s",
-            av_get_media_type_string(info->media_type), _s_fmt_ctx->filename);
+    if (info->stream_index != -1) {
+        pthread_cancel(info->decoding_thread);
+    }
+    LOG_INFO("decoding thread exit, for %s stream in file %s",
+            av_get_media_type_string(info->media_type), info->fmt_ctx->filename);
 }
 
 void *decoding_packet(void *arg)
 {
     int ret = 0;
-
-    pthread_cleanup_push(decoding_thread_clean, arg);
 
     if (!arg) {
         return NULL;
@@ -118,51 +174,41 @@ void *decoding_packet(void *arg)
 
     enum AVMediaType media_type = info->media_type;
 
-    /*
-    int bits_per_pixel = 0;
-    if (media_type == AVMEDIA_TYPE_VIDEO) {
-        AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(_s_fmt_ctx->pix_fmt);
-        if (!desc) {
-            LOG_ERROR("[decoding_packet] error getting pixfmt descriptor, for %s stream in file %s : %s",
-                    av_get_media_type_string(media_type), _s_fmt_ctx->filename, av_err2str(ret));
-            return NULL;
-        }
-        bits_per_pixel = av_get_bits_per_pixel(desc);
-    } else if (media_type == AVMEDIA_TYPE_AUDIO) {
-        ;//TODO
-    } else {
-        LOG_ERROR("[decoding_packet] unsupport media type %s in file %s",
-                av_get_media_type_string(media_type), _s_fmt_ctx->filename);
-        return NULL;
-    }
-    */
-
     AVStream *stream = NULL;
-    stream = _s_fmt_ctx->streams[info->stream_index];
+    stream = info->fmt_ctx->streams[info->stream_index];
+    int width  = stream->codec->width;
+    int height = stream->codec->height;
 
     AVCodec *dec = NULL;
     dec = avcodec_find_decoder(stream->codec->codec_id);
     if (!dec) {
-        LOG_ERROR("[decoding_packet] Error finding decoder: %s, for %s stream in file %s : %s",
+        LOG_ERROR("Error finding decoder: %s, for %s stream in file %s : %s",
                 avcodec_get_name(stream->codec->codec_id),
-                av_get_media_type_string(media_type), _s_fmt_ctx->filename, av_err2str(ret));
+                av_get_media_type_string(media_type), info->fmt_ctx->filename, av_err2str(ret));
         return NULL;
     }
 
     AVDictionary *opt = NULL;
     ret = avcodec_open2(stream->codec, dec, &opt);
     if (ret < 0) {
-        LOG_ERROR("[decoding_packet] open codec: %s failed, for %s stream in file %s : %s",
+        LOG_ERROR("open codec: %s failed, for %s stream in file %s : %s",
                 avcodec_get_name(stream->codec->codec_id), av_get_media_type_string(media_type),
-                _s_fmt_ctx->filename, av_err2str(ret));
+                info->fmt_ctx->filename, av_err2str(ret));
+        return NULL;
+    }
+
+    if ((stream->codec->codec_type == AVMEDIA_TYPE_VIDEO) &&
+            (stream->codec->pix_fmt != AV_PIX_FMT_YUV420P)) {
+        LOG_ERROR("no support video stream in non-YUV420P format yet");
+        avcodec_close(stream->codec);
         return NULL;
     }
 
     AVFrame *frame = NULL;
     frame = av_frame_alloc();
     if (!frame) {
-        LOG_ERROR("[decoding_packet] alloc frame failed for %s stream in file %s : %s",
-                av_get_media_type_string(media_type), _s_fmt_ctx->filename, av_err2str(ret));
+        LOG_ERROR("alloc frame failed for %s stream in file %s : %s",
+                av_get_media_type_string(media_type), info->fmt_ctx->filename, av_err2str(ret));
         avcodec_close(stream->codec);
         return NULL;
     }
@@ -170,11 +216,16 @@ void *decoding_packet(void *arg)
     int got_frame = 0;
 
     std::deque<AVPacket> &p_deque = info->pkt_deque;
-    pthread_mutex_t *mutex = &(info->mutex);
+    pthread_mutex_t *mutex = &info->mutex;
     AVPacket pkt;
     av_init_packet(&pkt);
     pkt.data = NULL;
     pkt.size = 0;
+
+    uint8_t *video_data[4] = {NULL};
+    int video_linesize[4];
+    int data_size = 0;
+    data_size = av_image_alloc(video_data, video_linesize, width, height, AV_PIX_FMT_YUV420P, 1);
 
     while (1) {
         pick_pkt(p_deque, &pkt, mutex);
@@ -185,34 +236,21 @@ void *decoding_packet(void *arg)
         do {
             if (media_type == AVMEDIA_TYPE_VIDEO) {
                 ret = avcodec_decode_video2(stream->codec, frame, &got_frame, &pkt);
+                av_image_copy(video_data, video_linesize, (const uint8_t **)(frame->data),
+                        frame->linesize, AV_PIX_FMT_YUV420P, frame->width, frame->height);
             } else if (media_type == AVMEDIA_TYPE_AUDIO) {
                 ret = avcodec_decode_audio4(stream->codec, frame, &got_frame, &pkt);
             }
 
             if (ret < 0) {
-                LOG_ERROR("[decoding_packet] Error decoding %s stream in file %s : %s, "
-                        "end up decoding this stream", av_get_media_type_string(media_type),
-                        _s_fmt_ctx->filename, av_err2str(ret));
+                LOG_ERROR("Error decoding %s stream in file %s : %s, end up decoding this stream",
+                        av_get_media_type_string(media_type),
+                        info->fmt_ctx->filename, av_err2str(ret));
                 goto out;
             }
 
             //size_t unpadded_linesize;
             //unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample((enum AVSampleFormat)frame->format);
-            /*
-            int bytes_per_sample = 0;
-            if (media_type == AVMEDIA_TYPE_VIDEO) {
-                ;//TODO
-            } else if (media_type == AVMEDIA_TYPE_AUDIO) {
-                if (bytes_per_sample == 0) {
-                    bytes_per_sample = av_get_bytes_per_sample((enum AVSampleFormat)frame->format);
-                    if (bytes_per_sample == 0) {
-                        LOG_ERROR("[decoding_packet] error getting bytes per sample for %s stream in file %s : %s",
-                                av_get_media_type_string(media_type), _s_fmt_ctx->filename, av_err2str(ret));
-                        goto out;
-                    }
-                }
-            }
-            */
 
             pkt.data += ret;
             pkt.size -= ret;
@@ -222,94 +260,157 @@ void *decoding_packet(void *arg)
 out:
     av_frame_free(&frame);
     avcodec_close(stream->codec);
-    pthread_cleanup_pop(1);
     return NULL;
 }
 
 void *receiving_packet(void *arg)
 {
+    AVFormatContext *fmt_ctx = NULL;
+    struct deque_info video_info;
+    struct deque_info audio_info;
+    char *filename = NULL;
     int ret = 0;
 
     if (!arg) {
         return NULL;
     }
 
-    struct deque_info *info = (struct deque_info*)arg;
+    filename = (char*)arg;
 
-    enum AVMediaType media_type = info->media_type;
+    video_info.receiving_thread = pthread_self();
+    audio_info.receiving_thread = pthread_self();
+    pthread_mutex_init(&video_info.mutex, NULL);
+    pthread_mutex_init(&audio_info.mutex, NULL);
+    video_info.media_type = AVMEDIA_TYPE_VIDEO;
+    audio_info.media_type = AVMEDIA_TYPE_AUDIO;
+    video_info.pkt_deque.clear();
+    audio_info.pkt_deque.clear();
+    video_info.stream_index = -1;
+    audio_info.stream_index = -1;
 
-    ret = av_find_best_stream(_s_fmt_ctx, media_type, -1, -1, NULL, 0);
+    av_register_all();
+    avcodec_register_all();
+    avformat_network_init();
+    //avdevice_register_all();
+
+    ret = avformat_open_input(&fmt_ctx, filename, NULL, NULL);
+    if (ret < 0) {
+        LOG_ERROR("open input failed for file %s : %s", filename, av_err2str(ret));
+        avformat_network_deinit();
+        return NULL;
+    }
+    video_info.fmt_ctx = fmt_ctx;
+    audio_info.fmt_ctx = fmt_ctx;
+    LOG_INFO("open file %s", filename);
+
+    ret = avformat_find_stream_info(fmt_ctx, NULL);
+    if (ret < 0) {
+        LOG_ERROR("find stream info failed for file %s : %s", filename, av_err2str(ret));
+        avformat_close_input(&fmt_ctx);
+        avformat_network_deinit();
+        return NULL;
+    }
+
+    ret = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     if (ret == AVERROR_STREAM_NOT_FOUND) {
-        LOG_WARN("[receiving_packet] not found %s stream in file %s",
-                av_get_media_type_string(media_type), _s_fmt_ctx->filename);
-        return NULL;
+        LOG_WARN("not found video stream in file %s", filename);
     } else if (ret < 0) {
-        LOG_ERROR("[receiving_packet] Error finding %s stream in file %s : %s",
-                av_get_media_type_string(media_type), _s_fmt_ctx->filename, av_err2str(ret));
+        LOG_ERROR("Error finding video stream in file %s : %s", filename, av_err2str(ret));
+    } else {
+        video_info.stream_index = ret;
+        LOG_INFO("found video stream for file %s", filename);
+    }
+
+    ret = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    if (ret == AVERROR_STREAM_NOT_FOUND) {
+        LOG_WARN("not found audio stream in file %s", filename);
+    } else if (ret < 0) {
+        LOG_ERROR("Error finding audio stream in file %s : %s", filename, av_err2str(ret));
+    } else {
+        audio_info.stream_index = ret;
+        LOG_INFO("found audio stream for file %s", filename);
+    }
+
+    if ((video_info.stream_index == -1) && (audio_info.stream_index == -1)) {
+        avformat_close_input(&fmt_ctx);
+        avformat_network_deinit();
         return NULL;
     }
 
-    info->stream_index = ret;
+    LOG_INFO("start receiving thread for file %s", filename);
+    av_read_play(fmt_ctx);
 
-    LOG_INFO("[receiving_packet] start thread for %s stream in file %s",
-            av_get_media_type_string(media_type), _s_fmt_ctx->filename);
-
-    pthread_t decoding_thread;
-    if ((ret = pthread_create(&decoding_thread, NULL, decoding_packet, info)) != 0) {
-        LOG_WARN("[receiving_packet] failed to create decoding packet thread, "
-                "for %s stream in file %s : %s", av_get_media_type_string(media_type),
-                _s_fmt_ctx->filename, strerror(ret));
-        LOG_WARN("[receiving_packet] receiving thread exit, for %s stream in file %s",
-                av_get_media_type_string(media_type), _s_fmt_ctx->filename);
-        return NULL;
+    if (video_info.stream_index != -1) {
+        if ((ret = pthread_create(&video_info.decoding_thread, NULL,
+                        decoding_packet, &video_info)) != 0) {
+            LOG_WARN("failed to create decoding thread, for video stream in file %s : %s",
+                    filename, strerror(ret));
+        }
     }
+    pthread_cleanup_push(receiving_thread_clean, &video_info);
 
-    pthread_cleanup_push(receiving_thread_clean, info);
-
-    std::deque<AVPacket> &p_deque = info->pkt_deque;
-    pthread_mutex_t *mutex = &(info->mutex);
+    if (audio_info.stream_index != -1) {
+        if ((ret = pthread_create(&audio_info.decoding_thread, NULL,
+                        decoding_packet, &audio_info)) != 0) {
+            LOG_WARN("failed to create decoding thread, for audio stream in file %s : %s",
+                    filename, strerror(ret));
+        }
+    }
+    pthread_cleanup_push(receiving_thread_clean, &audio_info);
 
     AVPacket pkt;
     av_init_packet(&pkt);
     pkt.data = NULL;
     pkt.size = 0;
 
+    std::deque<AVPacket> &v_deque = video_info.pkt_deque;
+    std::deque<AVPacket> &a_deque = audio_info.pkt_deque;
+    pthread_mutex_t *v_mutex = &video_info.mutex;
+    pthread_mutex_t *a_mutex = &audio_info.mutex;
+    int video_index = video_info.stream_index;
+    int audio_index = audio_info.stream_index;
+
     while (1) { // TODO : how to break ?
-        ret = av_read_frame(_s_fmt_ctx, &pkt);
+        ret = av_read_frame(fmt_ctx, &pkt);
         if (ret < 0) {
-            LOG_WARN("[receiving_packet] read frame failed, for %s stream in file %s : %s",
-                    av_get_media_type_string(media_type), _s_fmt_ctx->filename, av_err2str(ret));
+            LOG_WARN("read frame failed, in file %s : %s", filename, av_err2str(ret));
             continue;
         }
 
-        LOG_DEBUG("[receiving_packet] read frame success, in file %s", _s_fmt_ctx->filename);
+        LOG_DEBUG("read frame success, in file %s", filename);
 
-        insert_pkt(p_deque, &pkt, mutex);
+        if (pkt.stream_index == video_index) {
+            insert_pkt(v_deque, &pkt, v_mutex);
+        } else if (pkt.stream_index == audio_index) {
+            insert_pkt(a_deque, &pkt, a_mutex);
+        }
     }
 
-    pthread_cleanup_pop(1);
+    LOG_INFO("close file %s", filename);
+    avformat_close_input(&fmt_ctx);
+    avformat_network_deinit();
+    pthread_cleanup_pop(1); //audio decoding thread
+    pthread_cleanup_pop(1); //video decoding thread
     return NULL;
 }
 
 int new_file(std::string url)
 {
-    pthread_t video_thread;
-    pthread_t audio_thread;
     int ret = 0;
 
     ret = fork();
     if (ret < 0) {
-        LOG_ERROR("[new_file] fork failed for file %s : %s", url.c_str(), strerror(errno));
+        LOG_ERROR("fork failed for file %s : %s", url.c_str(), strerror(errno));
         return ret;
     } else if (ret == 0){
         // child do not live alone
         ret = prctl(PR_SET_PDEATHSIG, SIGKILL);
         if (ret < 0) {
-            LOG_WARN("[new_file] prctl failed for file %s : %s", url.c_str(), strerror(errno));
+            LOG_WARN("prctl failed for file %s : %s", url.c_str(), strerror(errno));
         }
         if (getppid() == 1) {
             // parent already exit
-            LOG_ERROR("[new_file] parent process alread exit, "
+            LOG_ERROR("parent process alread exit, "
                     "child exit now! for file %s", url.c_str());
             exit(1);
         }
@@ -317,61 +418,14 @@ int new_file(std::string url)
         return ret;
     }
 
-    _s_child_processes.clear();
-
-    LOG_INFO("[new_file] launch file %s", url.c_str());
-
-    av_register_all();
-    avcodec_register_all();
-    avformat_network_init();
-    //avdevice_register_all();
-
-    ret = avformat_open_input(&_s_fmt_ctx, url.c_str(), NULL, NULL);
-    if (ret < 0) {
-        LOG_ERROR("[new_file] open input failed for file %s : %s",
-                url.c_str(), av_err2str(ret));
-        avformat_network_deinit();
-        return -1;
-    }
-
-    ret = avformat_find_stream_info(_s_fmt_ctx, NULL);
-    if (ret < 0) {
-        LOG_ERROR("[new_file] find stream info failed for file %s : %s",
-                url.c_str(), av_err2str(ret));
-        avformat_close_input(&_s_fmt_ctx);
-        avformat_network_deinit();
-        return -1;
-    }
-
-    struct deque_info video_info;
-    video_info.media_type = AVMEDIA_TYPE_VIDEO;
-    pthread_mutex_init(&video_info.mutex, NULL);
-    video_info.pkt_deque.clear();
-    if ((ret = pthread_create(&video_thread, NULL, receiving_packet, &video_info)) != 0) {
-        LOG_WARN("[new_file] failed to create receiving packet thread, for video stream in file %s : %s",
+    pthread_t thread;
+    if ((ret = pthread_create(&thread, NULL, receiving_packet, (void*)url.c_str())) != 0) {
+        LOG_WARN("failed to create receiving thread, for file %s : %s",
                 url.c_str(), strerror(ret));
     }
-    video_info.receiving_thread = video_thread;
 
-    struct deque_info audio_info;
-    audio_info.media_type = AVMEDIA_TYPE_AUDIO;
-    pthread_mutex_init(&audio_info.mutex, NULL);
-    audio_info.pkt_deque.clear();
-    if ((ret = pthread_create(&audio_thread, NULL, receiving_packet, &audio_info)) != 0) {
-        LOG_WARN("[new_file] failed to create receiving packet thread, for audio stream in file %s : %s",
-                url.c_str(), strerror(ret));
-    }
-    audio_info.receiving_thread = audio_thread;
-
-    LOG_INFO("[new_file] playing the file %s", url.c_str());
-    av_read_play(_s_fmt_ctx);
-
-    pthread_join(video_thread, NULL);
-    pthread_join(audio_thread, NULL);
-
-    LOG_INFO("[new_file] close the file %s", url.c_str());
-    avformat_close_input(&_s_fmt_ctx);
-    avformat_network_deinit();
+    pthread_join(thread, NULL);
+    LOG_INFO("stop receiving thread for file %s", url.c_str());
 
     return 0;
 }
@@ -421,27 +475,54 @@ int prepar_socket(int port, int backlog)
 int start(int port, std::vector<std::string> *files)
 {
     std::vector<struct child_info>::iterator child_iter;
+    std::vector<struct child_info> child_processes;
     std::vector<std::string>::iterator file_iter;
     struct event_base *base = NULL;
     struct evhttp *httpd = NULL;
     int ret = 0;
 
+    child_processes.clear();
+    for (file_iter = files->begin(); file_iter != files->end(); file_iter++) {
+        int pid = new_file(*file_iter);
+        if (pid < 0) {
+            LOG_ERROR("fork failed, for file %s", file_iter->c_str());
+            continue;
+        } else if (pid == 0) {
+            exit(0);
+        } else {
+            struct child_info tt;
+            tt.pid = pid;
+            tt.file = *file_iter;
+            child_processes.push_back(tt);
+        }
+    }
+
+    while (child_processes.size() != 0) {
+        pid_t pid = wait(NULL);
+        for (child_iter = child_processes.begin(); child_iter != child_processes.end();
+                child_iter++) {
+            if (child_iter->pid == pid) {
+                child_processes.erase(child_iter);
+            }
+        }
+    }
+
     int fd = prepar_socket(port, 1024);
     if (fd < 0) {
-        LOG_ERROR("[start] prepar socket failed: %s", strerror(errno));
+        LOG_ERROR("prepar socket failed: %s", strerror(errno));
         return -1;
     }
 
     base = event_base_new();
     if (base == NULL) {
-        LOG_ERROR("[start] event_base_new failed");
+        LOG_ERROR("event_base_new failed");
         ret = -1;
         goto out;
     }
 
     httpd = evhttp_new(base);
     if (httpd == NULL) {
-        LOG_ERROR("[start] evhttp_new failed");
+        LOG_ERROR("evhttp_new failed");
         event_base_free(base);
         base = NULL;
         ret = -1;
@@ -449,7 +530,7 @@ int start(int port, std::vector<std::string> *files)
     }
 
     if (evhttp_accept_socket(httpd, fd) != 0) {
-        LOG_ERROR("[start] evhttp_accept_socket failed");
+        LOG_ERROR("evhttp_accept_socket failed");
         evhttp_free(httpd);
         httpd = NULL;
         event_base_free(base);
@@ -461,23 +542,10 @@ int start(int port, std::vector<std::string> *files)
     evhttp_set_cb(httpd, "/stream_control", stream_control, NULL);
     //evhttp_set_gencb(httpd, gen_handler, NULL);
 
-    _s_child_processes.clear();
-    for (file_iter = files->begin(); file_iter != files->end(); file_iter++) {
-        int pid = new_file(*file_iter);
-        if (pid > 0) {
-            struct child_info tt;
-            tt.pid = pid;
-            tt.file = *file_iter;
-            _s_child_processes.push_back(tt);
-        } else {
-            break;
-        }
-    }
-
     event_base_dispatch(base);
 
 out:
-    for (child_iter = _s_child_processes.begin(); child_iter != _s_child_processes.end(); child_iter++) {
+    for (child_iter = child_processes.begin(); child_iter != child_processes.end(); child_iter++) {
         kill(child_iter->pid, SIGKILL);
     }
 
@@ -539,24 +607,24 @@ int main(int argc, char **argv)
 
     memset(&sb, 0, sizeof(struct stat));
     if (stat(config_file, &sb) == -1) {
-        fprintf(stderr, "[main] cannot stat file %s: %s\n", config_file, strerror(errno));
+        fprintf(stderr, "cannot stat file %s: %s\n", config_file, strerror(errno));
         return 1;
     } else {
         if ((sb.st_mode & S_IFMT) != S_IFREG) {
-            fprintf(stderr, "[main] %s is not a regular file\n", config_file);
+            fprintf(stderr, "%s is not a regular file\n", config_file);
             return 1;
         }
     }
 
     fd = fopen(config_file, "r");
     if (!fd) {
-        fprintf(stderr, "[main] open configure file failed: %s\n", strerror(errno));
+        fprintf(stderr, "open configure file failed: %s\n", strerror(errno));
         return 1;
     }
 
     buf = (char*)calloc(sb.st_size + 1, 1);
     if (!buf) {
-        fprintf(stderr, "[main] calloc failed: %s\n", strerror(errno));
+        fprintf(stderr, "calloc failed: %s\n", strerror(errno));
         fclose(fd);
         return 1;
     }
@@ -565,7 +633,7 @@ int main(int argc, char **argv)
     while (!feof(fd)) {
         ret = fread(&buf[ret], 1, sb.st_size - ret, fd);
         if (ferror(fd)) {
-            fprintf(stderr, "[main] something error when reading configure file: %s\n", strerror(errno));
+            fprintf(stderr, "something error when reading configure file: %s\n", strerror(errno));
             fclose(fd);
             free(buf);
             return 1;
@@ -573,7 +641,7 @@ int main(int argc, char **argv)
     }
 
     if (!reader.parse(buf, config)) {
-        fprintf(stderr, "[main] the configure file is not in a valid json format\n");
+        fprintf(stderr, "the configure file is not in a valid json format\n");
         fclose(fd);
         free(buf);
         return 1;
@@ -582,20 +650,20 @@ int main(int argc, char **argv)
     free(buf);
 
     if (!config.isMember("log_file")) {
-        fprintf(stderr, "[main] not found config item 'log_file'\n");
+        fprintf(stderr, "not found config item 'log_file'\n");
         return 1;
     } else {
         if (!config["log_file"].isString()) {
-            fprintf(stderr, "[main] config item 'log_file' is not a string\n");
+            fprintf(stderr, "config item 'log_file' is not a string\n");
             return 1;
         }
     }
     if (!config.isMember("log_leave")) {
-        fprintf(stderr, "[main] not found config item 'log_leave'\n");
+        fprintf(stderr, "not found config item 'log_leave'\n");
         return 1;
     } else {
         if (!config["log_leave"].isInt()) {
-            fprintf(stderr, "[main] config item 'log_leave' is not a integer\n");
+            fprintf(stderr, "config item 'log_leave' is not a integer\n");
             return 1;
         }
     }
@@ -603,30 +671,32 @@ int main(int argc, char **argv)
     if (my_log_init(".", config["log_file"].asString().c_str(),
                 (config["log_file"].asString() + ".we").c_str(),
                 config["log_leave"].asInt()) < 0) {
-        fprintf(stderr, "[main] my_log_init failed: %s\n", strerror(errno));
+        fprintf(stderr, "my_log_init failed: %s\n", strerror(errno));
         unlink(config["log_file"].asString().c_str());
         unlink((config["log_file"].asString() + ".we").c_str());
         //unlink("log");
         return 1;
     }
 
-    if (!freopen("dev/null", "r", stdin)) {
-        LOG_ERROR("[main] failed to redirect STDIN to /dev/null");
+    if (!freopen("/dev/null", "r", stdin)) {
+        LOG_ERROR("failed to redirect STDIN to /dev/null");
     }
-    if (!freopen(config["log_file"].asString().c_str(), "w", stdout)) {
-        LOG_ERROR("[main] failed to redirect STDIN to %s", config["log_file"].asString().c_str());
+    if (!freopen((config["log_file"].asString() + ".stdout").c_str(), "w", stdout)) {
+        LOG_ERROR("failed to redirect STDIN to %s",
+                (config["log_file"].asString() + ".stdout").c_str());
     }
-    if (!freopen((config["log_file"].asString() + ".we").c_str(), "w", stderr)) {
-        LOG_ERROR("[main] failed to redirect STDIN to %s", (config["log_file"].asString() + ".we").c_str());
+    if (!freopen((config["log_file"].asString() + ".stderr").c_str(), "w", stderr)) {
+        LOG_ERROR("failed to redirect STDIN to %s",
+                (config["log_file"].asString() + ".stderr").c_str());
     }
 
     if (!config.isMember("streams")) {
-        LOG_ERROR("[main] there is no item named 'streams' in configure file");
+        LOG_ERROR("there is no item named 'streams' in configure file");
         ret = 1;
         goto end;
     }
     if (!config["streams"].isArray()) {
-        LOG_ERROR("[main] the item 'streams' is not a array");
+        LOG_ERROR("the item 'streams' is not a array");
         ret = 1;
         goto end;
     }
@@ -640,27 +710,27 @@ int main(int argc, char **argv)
         if (temp.isString()) {
             streams.push_back(temp.asString());
         } else {
-            LOG_WARN("[main] the %dth item of 'streams' is not a string", streams_count + 1);
+            LOG_WARN("the %dth item of 'streams' is not a string", streams_count + 1);
         }
     }
 
     if (streams.size() == 0) {
-        LOG_WARN("[main] no stream found yet");
+        LOG_WARN("no stream found yet");
     }
 
     if (!config.isMember("port")) {
-        LOG_ERROR("[main] there is no item named 'port' in configure file");
+        LOG_ERROR("there is no item named 'port' in configure file");
         ret = 1;
         goto end;
     }
     if (!config["port"].isInt()) {
-        LOG_ERROR("[main] the item 'port' is not a integer");
+        LOG_ERROR("the item 'port' is not a integer");
         ret = 1;
         goto end;
     }
 
     if (start(config["port"].asInt(), &streams) < 0) {
-        LOG_ERROR("[main] start failed");
+        LOG_ERROR("start failed");
         ret = 1;
         goto end;
     }
