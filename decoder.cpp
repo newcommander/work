@@ -164,6 +164,7 @@ void receiving_thread_clean(void *arg)
 
 void *decoding_packet(void *arg)
 {
+    char err[AV_ERROR_MAX_STRING_SIZE];
     int ret = 0;
 
     if (!arg) {
@@ -182,18 +183,20 @@ void *decoding_packet(void *arg)
     AVCodec *dec = NULL;
     dec = avcodec_find_decoder(stream->codec->codec_id);
     if (!dec) {
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
         LOG_ERROR("Error finding decoder: %s, for %s stream in file %s : %s",
                 avcodec_get_name(stream->codec->codec_id),
-                av_get_media_type_string(media_type), info->fmt_ctx->filename, av_err2str(ret));
+                av_get_media_type_string(media_type), info->fmt_ctx->filename, err);
         return NULL;
     }
 
     AVDictionary *opt = NULL;
     ret = avcodec_open2(stream->codec, dec, &opt);
     if (ret < 0) {
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
         LOG_ERROR("open codec: %s failed, for %s stream in file %s : %s",
                 avcodec_get_name(stream->codec->codec_id), av_get_media_type_string(media_type),
-                info->fmt_ctx->filename, av_err2str(ret));
+                info->fmt_ctx->filename, err);
         return NULL;
     }
 
@@ -207,8 +210,9 @@ void *decoding_packet(void *arg)
     AVFrame *frame = NULL;
     frame = av_frame_alloc();
     if (!frame) {
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
         LOG_ERROR("alloc frame failed for %s stream in file %s : %s",
-                av_get_media_type_string(media_type), info->fmt_ctx->filename, av_err2str(ret));
+                av_get_media_type_string(media_type), info->fmt_ctx->filename, err);
         avcodec_close(stream->codec);
         return NULL;
     }
@@ -224,8 +228,7 @@ void *decoding_packet(void *arg)
 
     uint8_t *video_data[4] = {NULL};
     int video_linesize[4];
-    int data_size = 0;
-    data_size = av_image_alloc(video_data, video_linesize, width, height, AV_PIX_FMT_YUV420P, 1);
+    av_image_alloc(video_data, video_linesize, width, height, AV_PIX_FMT_YUV420P, 1);
 
     while (1) {
         pick_pkt(p_deque, &pkt, mutex);
@@ -243,9 +246,10 @@ void *decoding_packet(void *arg)
             }
 
             if (ret < 0) {
+                av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
                 LOG_ERROR("Error decoding %s stream in file %s : %s, end up decoding this stream",
                         av_get_media_type_string(media_type),
-                        info->fmt_ctx->filename, av_err2str(ret));
+                        info->fmt_ctx->filename, err);
                 goto out;
             }
 
@@ -265,6 +269,7 @@ out:
 
 void *receiving_packet(void *arg)
 {
+    char err[AV_ERROR_MAX_STRING_SIZE];
     AVFormatContext *fmt_ctx = NULL;
     struct deque_info video_info;
     struct deque_info audio_info;
@@ -293,9 +298,12 @@ void *receiving_packet(void *arg)
     avformat_network_init();
     //avdevice_register_all();
 
+    LOG_INFO("start receiving thread for file %s", filename);
+
     ret = avformat_open_input(&fmt_ctx, filename, NULL, NULL);
     if (ret < 0) {
-        LOG_ERROR("open input failed for file %s : %s", filename, av_err2str(ret));
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
+        LOG_ERROR("open input failed for file %s : %s", filename, err);
         avformat_network_deinit();
         return NULL;
     }
@@ -305,7 +313,8 @@ void *receiving_packet(void *arg)
 
     ret = avformat_find_stream_info(fmt_ctx, NULL);
     if (ret < 0) {
-        LOG_ERROR("find stream info failed for file %s : %s", filename, av_err2str(ret));
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
+        LOG_ERROR("find stream info failed for file %s : %s", filename, err);
         avformat_close_input(&fmt_ctx);
         avformat_network_deinit();
         return NULL;
@@ -315,7 +324,8 @@ void *receiving_packet(void *arg)
     if (ret == AVERROR_STREAM_NOT_FOUND) {
         LOG_WARN("not found video stream in file %s", filename);
     } else if (ret < 0) {
-        LOG_ERROR("Error finding video stream in file %s : %s", filename, av_err2str(ret));
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
+        LOG_ERROR("Error finding video stream in file %s : %s", filename, err);
     } else {
         video_info.stream_index = ret;
         LOG_INFO("found video stream for file %s", filename);
@@ -325,7 +335,8 @@ void *receiving_packet(void *arg)
     if (ret == AVERROR_STREAM_NOT_FOUND) {
         LOG_WARN("not found audio stream in file %s", filename);
     } else if (ret < 0) {
-        LOG_ERROR("Error finding audio stream in file %s : %s", filename, av_err2str(ret));
+        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
+        LOG_ERROR("Error finding audio stream in file %s : %s", filename, err);
     } else {
         audio_info.stream_index = ret;
         LOG_INFO("found audio stream for file %s", filename);
@@ -337,7 +348,6 @@ void *receiving_packet(void *arg)
         return NULL;
     }
 
-    LOG_INFO("start receiving thread for file %s", filename);
     av_read_play(fmt_ctx);
 
     if (video_info.stream_index != -1) {
@@ -373,7 +383,8 @@ void *receiving_packet(void *arg)
     while (1) { // TODO : how to break ?
         ret = av_read_frame(fmt_ctx, &pkt);
         if (ret < 0) {
-            LOG_WARN("read frame failed, in file %s : %s", filename, av_err2str(ret));
+            av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
+            LOG_WARN("read frame failed, in file %s : %s", filename, err);
             continue;
         }
 
@@ -503,6 +514,7 @@ int start(int port, std::vector<std::string> *files)
                 child_iter++) {
             if (child_iter->pid == pid) {
                 child_processes.erase(child_iter);
+                break;
             }
         }
     }
