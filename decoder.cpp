@@ -253,6 +253,12 @@ void *decoding_packet(void *arg)
                 goto out;
             }
 
+            /*
+            if (ret == 99) {
+                test_image(video_data, video_linesize, frame->width, frame->height);
+            }
+            */
+
             //size_t unpadded_linesize;
             //unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample((enum AVSampleFormat)frame->format);
 
@@ -271,6 +277,7 @@ void *receiving_packet(void *arg)
 {
     char err[AV_ERROR_MAX_STRING_SIZE];
     AVFormatContext *fmt_ctx = NULL;
+    AVInputFormat *ifmt = NULL;
     struct deque_info video_info;
     struct deque_info audio_info;
     char *filename = NULL;
@@ -296,11 +303,17 @@ void *receiving_packet(void *arg)
     av_register_all();
     avcodec_register_all();
     avformat_network_init();
-    //avdevice_register_all();
+    avdevice_register_all();
 
     LOG_INFO("start receiving thread for file %s", filename);
 
-    ret = avformat_open_input(&fmt_ctx, filename, NULL, NULL);
+    if (strstr(filename, "/dev/video")) {
+        ifmt = av_find_input_format("v4l2");
+        ret = avformat_open_input(&fmt_ctx, filename, ifmt, NULL);
+    } else {
+        ret = avformat_open_input(&fmt_ctx, filename, NULL, NULL);
+    }
+
     if (ret < 0) {
         av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
         LOG_ERROR("open input failed for file %s : %s", filename, err);
@@ -518,6 +531,7 @@ int start(int port, std::vector<std::string> *files)
             }
         }
     }
+    return 0;
 
     int fd = prepar_socket(port, 1024);
     if (fd < 0) {
