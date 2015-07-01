@@ -1,0 +1,27 @@
+{
+    "log_file" : "log/decoder.log",
+    "log_leave" : 16,
+    "port" : 8888,
+    "streams" : [
+        "http://live.3gv.ifeng.com/live/hongkong.m3u8"
+    ],
+    "rtsp_config" : {
+        "RTSPPort" : "9090",
+        "RTSPBindAddress" : "0.0.0.0",
+        "MaxClients" : "1000",
+        "MaxBandwidth" : "5000",
+        "CustomLog" : "-",
+
+        "Streams" : {
+            "video.rm" : {
+                "Format" : "rtp",
+                "VideoFrameRate" : "30",
+                "VideoBitRate" : "256",
+                "VideoBufferSize" : "4000",
+                "VideoGopSize" : "30",
+                "StartSendOnKey" : "",
+                "NoAudio" : ""
+            }
+        }
+    }
+}

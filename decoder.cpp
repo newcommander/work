@@ -26,6 +26,7 @@ extern "C" {
 
 #include <vector>
 #include <deque>
+#include <map>
 
 #define DEQUE_MAX_SIZE 10000
 
@@ -37,385 +38,469 @@ extern "C" {
         nanosleep(&time_to_wait, NULL); \
     } while(0)
 
-struct deque_info {
-    std::deque<AVPacket> pkt_deque;
-    enum AVMediaType media_type;
-    pthread_t receiving_thread;
-    pthread_t decoding_thread;
+typedef struct {
     AVFormatContext *fmt_ctx;
-    pthread_mutex_t mutex;
+    const char *config_filename;
+    const char *config;
     int stream_index;
-};
+} Trans_data;
 
-struct child_info {
+typedef struct {
     std::string file;
+    int index;
     int pid;
-};
+} Child_info;
 
-/*
-extern int show_init(char *ip, int port, int *screen_width, int *screen_height);
-extern int show(int sockfd, unsigned char *buf);
-extern int show_end(int sockfd);
+std::vector<Child_info>::iterator child_iter;
+std::vector<Child_info> child_processes;
+int cur_rtsp_child = -1;
 
-void test_image(uint8_t **data, int *linesize, int width, int height)
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+std::deque<AVPacket*> pkt_deque;
+
+pthread_t rtsp_thread;
+Trans_data trans_data;
+std::string rtsp_config;
+
+int need_delive_pkt = 0;
+int want_video_stream_index = -1;
+int want_audio_stream_index = -1;
+
+AVFormatContext *fmt_ctx = NULL;
+char temp_file[1024];
+
+extern "C" void *rtsp_main(void *arg);
+extern "C" void rtsp_close();
+
+extern "C"
+int pickup_pkt(AVPacket *pkt)
 {
-    uint8_t *data_y = data[0];
-    uint8_t *data_u = data[1];
-    uint8_t *data_v = data[2];
-    int size_y = linesize[0];
-    int size_u = linesize[1];
-    int size_v = linesize[2];
-    int len = width * height;
-    int screen_height = 0;
-    int screen_width = 0;
-
-    unsigned char *buf = (unsigned char*)calloc(4 + len * 7, 1);
-    if (!buf) {
-        printf("calloc failed\n");
-        return;
+    if (!pkt) {
+        LOG_WARN("pickup_pkt failed: invalied packet");
+        return 1;
     }
 
-    std::string ip = "192.168.1.2";
-    int fd = show_init((char*)(ip.c_str()), 19900, &screen_width, &screen_height);
-    if (fd < 0) {
-        printf("show_init failed\n");
-        free(buf);
-        return;
+    AVPacket *tmp = NULL;
+
+    av_init_packet(pkt);
+    pkt->data = NULL;
+    pkt->size = 0;
+
+    pthread_mutex_lock(&mutex);
+    if (pkt_deque.empty()) {
+        pthread_mutex_unlock(&mutex);
+        return 1;
     }
-
-    buf[0] = len & 0xff;
-    buf[1] = ( len >> 8 ) & 0xff;
-    buf[2] = ( len >> 16 ) & 0xff;
-    buf[3] = ( len >> 24 ) & 0xff;
-
-    int h = 0, w = 0;
-    unsigned char *p = &buf[4];
-    unsigned char *c = &buf[4 + len * 4];
-    for (h = 0; h < height; h++) {
-        for (w = 0; w < width; w++) {
-            p[(h * width + w) * 4 + 0] = (unsigned char)(w & 0xff);
-            p[(h * width + w) * 4 + 1] = (unsigned char)((w >> 8) & 0xff);
-            p[(h * width + w) * 4 + 2] = (unsigned char)(h & 0xff);
-            p[(h * width + w) * 4 + 3] = (unsigned char)((h >> 8) & 0xff);
-            float y = (float)data_y[h * size_y + w];
-            float u = (float)data_u[(h / 2) * size_u + w / 2];
-            float v = (float)data_v[(h / 2) * size_v + w / 2];
-            c[(h * width + w) * 3 + 0] = (unsigned char)(y + 1.4075 * (v - 128));
-            c[(h * width + w) * 3 + 1] = (unsigned char)(y - 0.3455 * (u - 128) - 0.7169 * (v - 128));
-            c[(h * width + w) * 3 + 2] = (unsigned char)(y + 1.779 * (u - 128));
-        }
-    }
-    show(fd, buf);
-
-    free(buf);
-    show_end(fd);
+    tmp = pkt_deque.front();
+    pkt_deque.pop_front();
+    LOG_INFO("pickup <- nb: %d", pkt_deque.size());
+    pthread_mutex_unlock(&mutex);
+    av_copy_packet(pkt, tmp);
+    av_free_packet(tmp);
+    free(tmp);
+    return 0;
 }
-*/
 
-int insert_pkt(std::deque<AVPacket> &queue, AVPacket *pkt, pthread_mutex_t *mutex)
+int insert_pkt(AVPacket *pkt)
 {
-    if (!pkt || !mutex) {
-        return 0;
+    if (!pkt) {
+        LOG_WARN("insert_pkt failed: invalied packet");
+        return 1;
     }
 
-    pthread_mutex_lock(mutex);
-    if (queue.size() >= DEQUE_MAX_SIZE) {
-        LOG_WARN("insert failed, deque full");  // TODO: for which file ?
-        pthread_mutex_unlock(mutex);
-        return -1;
+    AVPacket *new_pkt = NULL;
+    new_pkt = (AVPacket*)malloc(sizeof(AVPacket));
+    if (!new_pkt) {
+        LOG_WARN("insert_pkt failed: alloc new_pkt failed: %s", strerror(errno));
+        return 1;
     }
-    queue.push_back(*pkt);
-    pthread_mutex_unlock(mutex);
+    av_init_packet(new_pkt);
+    new_pkt->data = NULL;
+    new_pkt->size = 0;
+    av_copy_packet(new_pkt, pkt);
+
+    pthread_mutex_lock(&mutex);
+    if (pkt_deque.size() >= DEQUE_MAX_SIZE) {
+        pthread_mutex_unlock(&mutex);
+        LOG_WARN("insert_pkt failed: deque full");
+        return 1;
+    }
+    pkt_deque.push_back(new_pkt);
+    LOG_INFO("insert -> nb: %d", pkt_deque.size());
+    pthread_mutex_unlock(&mutex);
 
     return 0;
 }
 
-void pick_pkt(std::deque<AVPacket> &queue, AVPacket *pkt, pthread_mutex_t *mutex)
+void fun(AVFrame *frame, enum AVPixelFormat pix_fmt)
 {
-    if (!mutex) {
-        pkt->size = 0;
+    if (pix_fmt != AV_PIX_FMT_YUV420P) {
         return;
     }
+    int linesize = frame->linesize[0];
+    uint8_t *data = frame->data[0];
+    int w = frame->width;
+    int h = frame->height;
 
-    pthread_mutex_lock(mutex);
-    if (queue.empty()) {
-        pkt->size = 0;
-        pthread_mutex_unlock(mutex);
-        return;
+    int i;
+
+    for (i = 0; i < w; i++) {
+        data[(h / 2) * linesize + i] = 0;
+        data[(h / 2 - 1) * linesize + i] = 0;
+        data[(h / 2 + 1) * linesize + i] = 0;
     }
-    *pkt = queue.front();
-    queue.pop_front();
-    pthread_mutex_unlock(mutex);
 }
 
-void receiving_thread_clean(void *arg)
+int open_input_file(AVFormatContext **ifmt_ctx, char *filename)
 {
-    if (!arg) {
-        return;
-    }
-
-    struct deque_info *info = (struct deque_info*)arg;
-    if (info->stream_index != -1) {
-        pthread_cancel(info->decoding_thread);
-    }
-    LOG_INFO("decoding thread exit, for %s stream in file %s",
-            av_get_media_type_string(info->media_type), info->fmt_ctx->filename);
-}
-
-void *decoding_packet(void *arg)
-{
-    char err[AV_ERROR_MAX_STRING_SIZE];
+    unsigned int i = 0;
     int ret = 0;
 
-    if (!arg) {
-        return NULL;
-    }
+    AVFormatContext *p_fmt = NULL;
+    //AVDictionary* options = NULL;
+    //av_dict_set(&options, "rtsp_transport", "tcp", 0);
 
-    struct deque_info *info = (struct deque_info*)arg;
-
-    enum AVMediaType media_type = info->media_type;
-
-    AVStream *stream = NULL;
-    stream = info->fmt_ctx->streams[info->stream_index];
-    int width  = stream->codec->width;
-    int height = stream->codec->height;
-
-    AVCodec *dec = NULL;
-    dec = avcodec_find_decoder(stream->codec->codec_id);
-    if (!dec) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("Error finding decoder: %s, for %s stream in file %s : %s",
-                avcodec_get_name(stream->codec->codec_id),
-                av_get_media_type_string(media_type), info->fmt_ctx->filename, err);
-        return NULL;
-    }
-
-    AVDictionary *opt = NULL;
-    ret = avcodec_open2(stream->codec, dec, &opt);
+    ret = avformat_open_input(ifmt_ctx, filename, NULL, NULL);
     if (ret < 0) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("open codec: %s failed, for %s stream in file %s : %s",
-                avcodec_get_name(stream->codec->codec_id), av_get_media_type_string(media_type),
-                info->fmt_ctx->filename, err);
-        return NULL;
+        LOG_ERROR("open %s failed: %s", filename, av_err2str(ret));
+        return 1;
     }
 
-    if ((stream->codec->codec_type == AVMEDIA_TYPE_VIDEO) &&
-            (stream->codec->pix_fmt != AV_PIX_FMT_YUV420P)) {
-        LOG_ERROR("no support video stream in non-YUV420P format yet");
-        avcodec_close(stream->codec);
-        return NULL;
+    p_fmt = *ifmt_ctx;
+
+    ret = avformat_find_stream_info(p_fmt, NULL);
+    if (ret < 0) {
+        LOG_ERROR("find stream info failed for %s: %s", filename, av_err2str(ret));
+        avformat_close_input(ifmt_ctx);
+        return 1;
     }
 
-    AVFrame *frame = NULL;
-    frame = av_frame_alloc();
-    if (!frame) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("alloc frame failed for %s stream in file %s : %s",
-                av_get_media_type_string(media_type), info->fmt_ctx->filename, err);
-        avcodec_close(stream->codec);
-        return NULL;
+    for (i = 0; i < p_fmt->nb_streams; i++) {
+        AVStream *stream;
+        AVCodecContext *codec_ctx;
+        stream = p_fmt->streams[i];
+        codec_ctx = stream->codec;
+        if (codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO
+                || codec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) {
+            ret = avcodec_open2(codec_ctx, avcodec_find_decoder(codec_ctx->codec_id), NULL);
+            if (ret < 0) {
+                LOG_ERROR("open codec failed for stream %d in %s", i, filename);
+                avformat_close_input(ifmt_ctx);
+                return 1;
+            }
+        }
+    }
+    //av_dump_format(p_fmt, 0, filename, 0);
+
+    return 0;
+}
+
+int open_temp_file(AVFormatContext *ifmt_ctx, AVFormatContext **ofmt_ctx, char *filename)
+{
+    unsigned int i = 0;
+    int ret = 0;
+
+    AVFormatContext *p_fmt = NULL;
+
+    if (!ifmt_ctx || !ofmt_ctx) {
+        LOG_ERROR("invalid paramters when open temp file for %s", filename);
+        return 1;
     }
 
-    int got_frame = 0;
+    avformat_alloc_output_context2(ofmt_ctx, NULL, NULL, filename);
+    if (!(*ofmt_ctx)) {
+        LOG_ERROR("alloc ofmt_ctx failed for %s: %s", filename, av_err2str(ret));
+        return 1;
+    }
+    p_fmt = *ofmt_ctx;
 
-    std::deque<AVPacket> &p_deque = info->pkt_deque;
-    pthread_mutex_t *mutex = &info->mutex;
+    int is_there_video_stream = 0;
+    int is_there_audio_stream = 0;
+
+    for (i = 0; i < ifmt_ctx->nb_streams; i++) {
+        AVCodecContext *dec_ctx = NULL;
+        AVCodecContext *enc_ctx = NULL;
+        AVStream *out_stream = NULL;
+        AVStream *in_stream = NULL;
+        AVCodec *encoder = NULL;
+
+        in_stream = ifmt_ctx->streams[i];
+        dec_ctx = in_stream->codec;
+
+        if ((is_there_video_stream && (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)) ||
+            (is_there_audio_stream && (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO))) {
+            continue;
+        }
+
+        if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+            out_stream = avformat_new_stream(*ofmt_ctx, NULL);
+            if (!out_stream) {
+                LOG_ERROR("alloc new stream failed for %s", filename);
+                avformat_close_input(ofmt_ctx);
+                return 1;
+            }
+            enc_ctx = out_stream->codec;
+
+            encoder = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+            if (!encoder) {
+                LOG_ERROR("find encoder %s faild for %s", avcodec_get_name(AV_CODEC_ID_MPEG4), filename);
+                avformat_close_input(ofmt_ctx);
+                return 1;
+            }
+
+            if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+                enc_ctx->bit_rate = dec_ctx->bit_rate;
+                enc_ctx->height = dec_ctx->height;
+                enc_ctx->width = dec_ctx->width;
+                enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio;
+                enc_ctx->time_base = dec_ctx->time_base;
+                if (enc_ctx->time_base.den > ((1 << 16) - 1)) {
+                    enc_ctx->time_base.den = (1 << 16) - 1;
+                }
+
+                if (dec_ctx->pix_fmt == AV_PIX_FMT_YUVJ420P) {
+                    enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+                    enc_ctx->color_range = AVCOL_RANGE_JPEG;
+                } else {
+                    enc_ctx->pix_fmt = dec_ctx->pix_fmt;
+                }
+
+                /*
+                char pix_string[1024];
+                memset(pix_string, 0, 1024);
+                av_get_pix_fmt_string(pix_string, 1024, enc_ctx->pix_fmt);
+                LOG_WARN("bit_rate:%d, height:%d, width:%d, sample_aspect_ratio:%d/%d, "
+                        "pix_fmt:%s, time_base:%d/%d", enc_ctx->bit_rate, enc_ctx->height,
+                        enc_ctx->width, enc_ctx->sample_aspect_ratio.num,
+                        enc_ctx->sample_aspect_ratio.den, pix_string, enc_ctx->time_base.num,
+                        enc_ctx->time_base.den);
+                */
+            } else {
+                enc_ctx->bit_rate = dec_ctx->bit_rate;
+                enc_ctx->sample_rate = dec_ctx->sample_rate;
+                enc_ctx->channel_layout = dec_ctx->channel_layout;
+                enc_ctx->channels = av_get_channel_layout_nb_channels(enc_ctx->channel_layout);
+                enc_ctx->sample_fmt = encoder->sample_fmts[0];
+                enc_ctx->time_base = (AVRational){1, enc_ctx->sample_rate};
+            }
+
+            ret = avcodec_open2(enc_ctx, encoder, NULL);
+            if (ret < 0) {
+                LOG_ERROR("open %s encoder '%s' failed for %s: %s",
+                        dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO ? "video" : "audio",
+                        encoder->name, filename, av_err2str(ret));
+                avformat_close_input(ofmt_ctx);
+                return 1;
+            }
+            if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+                want_video_stream_index = i;
+                is_there_video_stream = 1;
+            } else if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) {
+                want_audio_stream_index = i;
+                is_there_audio_stream = 1;
+            }
+            LOG_INFO("open encoder '%s' for stream %d success for %s", encoder->name, i, filename);
+        }
+    }
+
+    if (want_video_stream_index == -1) {
+        LOG_WARN("NOT found video stream in %s", filename);
+        return 1;
+    }
+    //av_dump_format(*ofmt_ctx, 0, temp_file, 1);
+
+    ret = avio_open(&(*ofmt_ctx)->pb, filename, AVIO_FLAG_WRITE);
+    if (ret < 0) {
+        LOG_ERROR("avio open failed for %s: %s", filename, av_err2str(ret));
+        avformat_close_input(ofmt_ctx);
+        return 1;
+    }
+    ret = avformat_write_header(*ofmt_ctx, NULL);
+    if (ret < 0) {
+        LOG_ERROR("write output header failed %s: %s", filename, av_err2str(ret));
+        avformat_close_input(ofmt_ctx);
+        return 1;
+    }
+    return 0;
+}
+
+int add_to_show_stream(AVCodecContext *codec, const AVFrame *frame, 
+        int (*enc_func)(AVCodecContext *, AVPacket *, const AVFrame *, int *))
+{
+    int got_packet = 0;
+    int ret = 0;
+
     AVPacket pkt;
     av_init_packet(&pkt);
     pkt.data = NULL;
     pkt.size = 0;
 
-    uint8_t *video_data[4] = {NULL};
-    int video_linesize[4];
-    av_image_alloc(video_data, video_linesize, width, height, AV_PIX_FMT_YUV420P, 1);
-
-    while (1) {
-        pick_pkt(p_deque, &pkt, mutex);
-        if (pkt.size == 0) {
-            msleep(100);
-            continue;
-        }
-        do {
-            if (media_type == AVMEDIA_TYPE_VIDEO) {
-                ret = avcodec_decode_video2(stream->codec, frame, &got_frame, &pkt);
-                av_image_copy(video_data, video_linesize, (const uint8_t **)(frame->data),
-                        frame->linesize, AV_PIX_FMT_YUV420P, frame->width, frame->height);
-            } else if (media_type == AVMEDIA_TYPE_AUDIO) {
-                ret = avcodec_decode_audio4(stream->codec, frame, &got_frame, &pkt);
-            }
-
-            if (ret < 0) {
-                av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-                LOG_ERROR("Error decoding %s stream in file %s : %s, end up decoding this stream",
-                        av_get_media_type_string(media_type),
-                        info->fmt_ctx->filename, err);
-                goto out;
-            }
-
-            /*
-            if (ret == 99) {
-                test_image(video_data, video_linesize, frame->width, frame->height);
-            }
-            */
-
-            //size_t unpadded_linesize;
-            //unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample((enum AVSampleFormat)frame->format);
-
-            pkt.data += ret;
-            pkt.size -= ret;
-        } while (pkt.size > 0);
+    ret = enc_func(codec, &pkt, frame, &got_packet);
+    if (ret < 0) {
+        LOG_ERROR("encode failed: %s", av_err2str(ret));
+        return 1;
     }
 
-out:
-    av_frame_free(&frame);
-    avcodec_close(stream->codec);
-    return NULL;
+    if (got_packet) {
+        if (insert_pkt(&pkt) != 0) {
+            LOG_ERROR("insert packet failed");
+            av_free_packet(&pkt);
+            return 1;
+        }
+        av_free_packet(&pkt);
+        return 0;
+    }
+    return 1;
 }
 
-void *receiving_packet(void *arg)
+int stream_process(char *filename)
 {
-    char err[AV_ERROR_MAX_STRING_SIZE];
-    AVFormatContext *fmt_ctx = NULL;
-    AVInputFormat *ifmt = NULL;
-    struct deque_info video_info;
-    struct deque_info audio_info;
-    char *filename = NULL;
     int ret = 0;
 
-    if (!arg) {
-        return NULL;
-    }
-
-    filename = (char*)arg;
-
-    video_info.receiving_thread = pthread_self();
-    audio_info.receiving_thread = pthread_self();
-    pthread_mutex_init(&video_info.mutex, NULL);
-    pthread_mutex_init(&audio_info.mutex, NULL);
-    video_info.media_type = AVMEDIA_TYPE_VIDEO;
-    audio_info.media_type = AVMEDIA_TYPE_AUDIO;
-    video_info.pkt_deque.clear();
-    audio_info.pkt_deque.clear();
-    video_info.stream_index = -1;
-    audio_info.stream_index = -1;
+    memset(temp_file, 0, 1024);
+    snprintf(temp_file, 1024, "tmp/temp_%d.avi", getpid());
 
     av_register_all();
     avcodec_register_all();
     avformat_network_init();
-    avdevice_register_all();
 
-    LOG_INFO("start receiving thread for file %s", filename);
+    AVFormatContext *ifmt_ctx = NULL;
+    AVFormatContext *ofmt_ctx = NULL;
 
-    if (strstr(filename, "/dev/video")) {
-        ifmt = av_find_input_format("v4l2");
-        ret = avformat_open_input(&fmt_ctx, filename, ifmt, NULL);
-    } else {
-        ret = avformat_open_input(&fmt_ctx, filename, NULL, NULL);
-    }
-
-    if (ret < 0) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("open input failed for file %s : %s", filename, err);
+    ret = open_input_file(&ifmt_ctx, filename);
+    if (ret != 0) {
         avformat_network_deinit();
-        return NULL;
+        return 1;
     }
-    video_info.fmt_ctx = fmt_ctx;
-    audio_info.fmt_ctx = fmt_ctx;
-    LOG_INFO("open file %s", filename);
 
-    ret = avformat_find_stream_info(fmt_ctx, NULL);
-    if (ret < 0) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("find stream info failed for file %s : %s", filename, err);
-        avformat_close_input(&fmt_ctx);
+    ret = open_temp_file(ifmt_ctx, &ofmt_ctx, temp_file);
+    if (ret != 0) {
+        avformat_close_input(&ifmt_ctx);
         avformat_network_deinit();
-        return NULL;
+        return 1;
     }
 
-    ret = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (ret == AVERROR_STREAM_NOT_FOUND) {
-        LOG_WARN("not found video stream in file %s", filename);
-    } else if (ret < 0) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("Error finding video stream in file %s : %s", filename, err);
-    } else {
-        video_info.stream_index = ret;
-        LOG_INFO("found video stream for file %s", filename);
-    }
+    int (*dec_func)(AVCodecContext *, AVFrame *, int *, const AVPacket *);
+    int (*enc_func)(AVCodecContext *, AVPacket *, const AVFrame *, int *);
+    dec_func = NULL;
+    enc_func = NULL;
 
-    ret = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-    if (ret == AVERROR_STREAM_NOT_FOUND) {
-        LOG_WARN("not found audio stream in file %s", filename);
-    } else if (ret < 0) {
-        av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-        LOG_ERROR("Error finding audio stream in file %s : %s", filename, err);
-    } else {
-        audio_info.stream_index = ret;
-        LOG_INFO("found audio stream for file %s", filename);
-    }
-
-    if ((video_info.stream_index == -1) && (audio_info.stream_index == -1)) {
-        avformat_close_input(&fmt_ctx);
+    AVFrame *frame = NULL;
+    frame = av_frame_alloc();
+    if (!frame) {
+        LOG_ERROR("alloc frame failed for %s: %s", filename, av_err2str(ret));
+        avformat_close_input(&ifmt_ctx);
+        avformat_close_input(&ofmt_ctx);
         avformat_network_deinit();
-        return NULL;
+        return 1;
     }
-
-    av_read_play(fmt_ctx);
-
-    if (video_info.stream_index != -1) {
-        if ((ret = pthread_create(&video_info.decoding_thread, NULL,
-                        decoding_packet, &video_info)) != 0) {
-            LOG_WARN("failed to create decoding thread, for video stream in file %s : %s",
-                    filename, strerror(ret));
-        }
-    }
-    pthread_cleanup_push(receiving_thread_clean, &video_info);
-
-    if (audio_info.stream_index != -1) {
-        if ((ret = pthread_create(&audio_info.decoding_thread, NULL,
-                        decoding_packet, &audio_info)) != 0) {
-            LOG_WARN("failed to create decoding thread, for audio stream in file %s : %s",
-                    filename, strerror(ret));
-        }
-    }
-    pthread_cleanup_push(receiving_thread_clean, &audio_info);
 
     AVPacket pkt;
     av_init_packet(&pkt);
     pkt.data = NULL;
     pkt.size = 0;
 
-    std::deque<AVPacket> &v_deque = video_info.pkt_deque;
-    std::deque<AVPacket> &a_deque = audio_info.pkt_deque;
-    pthread_mutex_t *v_mutex = &video_info.mutex;
-    pthread_mutex_t *a_mutex = &audio_info.mutex;
-    int video_index = video_info.stream_index;
-    int audio_index = audio_info.stream_index;
-
-    while (1) { // TODO : how to break ?
-        ret = av_read_frame(fmt_ctx, &pkt);
+    int got_frame = 0;
+    int stream_index = 0;
+    int read_error_counter = 0;
+    while (1) {
+        ret = av_read_frame(ifmt_ctx, &pkt);
         if (ret < 0) {
-            av_strerror(ret, err, AV_ERROR_MAX_STRING_SIZE);
-            LOG_WARN("read frame failed, in file %s : %s", filename, err);
+            if (read_error_counter++ < 10) {
+                msleep(100);
+                continue;
+            } else {
+                break;
+            }
+        }
+        read_error_counter = 0;
+        stream_index = pkt.stream_index;
+        enum AVMediaType type = ifmt_ctx->streams[stream_index]->codec->codec_type;
+        //TODO drop audio packet
+        if (stream_index != want_video_stream_index) {
             continue;
         }
 
-        LOG_DEBUG("read frame success, in file %s", filename);
+        av_packet_rescale_ts(&pkt, ifmt_ctx->streams[stream_index]->time_base,
+                ifmt_ctx->streams[stream_index]->codec->time_base);
 
-        if (pkt.stream_index == video_index) {
-            insert_pkt(v_deque, &pkt, v_mutex);
-        } else if (pkt.stream_index == audio_index) {
-            insert_pkt(a_deque, &pkt, a_mutex);
+        dec_func = (type == AVMEDIA_TYPE_VIDEO) ? avcodec_decode_video2 : avcodec_decode_audio4;
+        enc_func = (type == AVMEDIA_TYPE_VIDEO) ? avcodec_encode_video2 : avcodec_encode_audio2;
+
+        do {
+            got_frame = 0;
+            ret = dec_func(ifmt_ctx->streams[stream_index]->codec, frame, &got_frame, &pkt);
+            if (ret < 0) {
+                LOG_ERROR("decode packet failed for %s: %s", filename, av_err2str(ret));
+                avformat_close_input(&ifmt_ctx);
+                avformat_close_input(&ofmt_ctx);
+                avformat_network_deinit();
+                return 1;
+            }
+            pkt.data += ret;
+            pkt.size -= ret;
+        } while (pkt.size > 0);
+        if (got_frame) {
+            frame->pts = av_frame_get_best_effort_timestamp(frame);
+
+            if (type == AVMEDIA_TYPE_VIDEO) {
+                fun(frame, ifmt_ctx->streams[stream_index]->codec->pix_fmt);
+                if (need_delive_pkt) {
+                    ret = add_to_show_stream(ofmt_ctx->streams[stream_index]->codec, frame, enc_func);
+                    if (ret != 0) {
+                        LOG_ERROR("failed adding frame to show stream");
+                    }
+                }
+            }
+
+            av_frame_unref(frame);
         }
+        av_frame_unref(frame);
+        av_free_packet(&pkt);
+        continue;
     }
 
-    LOG_INFO("close file %s", filename);
-    avformat_close_input(&fmt_ctx);
-    avformat_network_deinit();
-    pthread_cleanup_pop(1); //audio decoding thread
-    pthread_cleanup_pop(1); //video decoding thread
+    return 0;
+}
+
+void *process_thread(void *arg)
+{
+    stream_process((char*)arg);
     return NULL;
+}
+
+void sigusr1_func(int signo)
+{
+    int ret = 0;
+
+    ret = avformat_open_input(&fmt_ctx, temp_file, NULL, NULL);
+    if (ret < 0) {
+        LOG_ERROR("open %s failed: %s", temp_file, av_err2str(ret));
+        return;
+    }
+
+    trans_data.fmt_ctx = fmt_ctx;
+    trans_data.config_filename = "decoder.conf";
+    trans_data.config = rtsp_config.c_str();
+    trans_data.stream_index = want_video_stream_index;
+
+    pkt_deque.clear();
+    need_delive_pkt = 1;
+    if ((ret = pthread_create(&rtsp_thread, NULL, rtsp_main, &trans_data)) != 0) {
+        LOG_ERROR("create rtsp_server thread failed");
+        need_delive_pkt = 0;
+        pkt_deque.clear();
+    }
+}
+
+void sigusr2_func(int signo)
+{
+    need_delive_pkt = 0;
+    rtsp_close();
+
+    avformat_close_input(&fmt_ctx);
+    fmt_ctx = NULL;
+    pkt_deque.clear();
 }
 
 int new_file(std::string url)
@@ -442,21 +527,100 @@ int new_file(std::string url)
         return ret;
     }
 
+    child_processes.clear();
+
+    signal(SIGUSR1, sigusr1_func);
+    signal(SIGUSR2, sigusr2_func);
+
     pthread_t thread;
-    if ((ret = pthread_create(&thread, NULL, receiving_packet, (void*)url.c_str())) != 0) {
+    if ((ret = pthread_create(&thread, NULL, process_thread, (void*)url.c_str())) != 0) {
         LOG_WARN("failed to create receiving thread, for file %s : %s",
                 url.c_str(), strerror(ret));
     }
-
     pthread_join(thread, NULL);
-    LOG_INFO("stop receiving thread for file %s", url.c_str());
+
+    LOG_WARN("process for %s exited", url.c_str());
 
     return 0;
 }
 
-void stream_control(struct evhttp_request *req, void *arg)
+void query_streams(struct evhttp_request *req, void *arg)
 {
-    ;
+    if (!req) {
+        return;
+    }
+
+    struct evbuffer *buf = evbuffer_new();
+    if (!buf) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "INTERNAL", NULL);
+        return;
+    }
+
+    evbuffer_add_printf(buf, "Index\tPID\tSource\n");
+    for (child_iter = child_processes.begin(); child_iter != child_processes.end();
+                child_iter++) {
+        evbuffer_add_printf(buf, "%d\t%d\t%s\n", child_iter->index, child_iter->pid, child_iter->file.c_str());
+    }
+
+    evhttp_add_header(req->output_headers, "Content-Type", "text/plain; charset=utf-8");
+    evhttp_add_header(req->output_headers, "Connection", "Close");
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
+    evbuffer_free(buf);
+}
+
+void select_stream(struct evhttp_request *req, void *arg)
+{
+    const char *value = NULL;
+    struct evkeyvalq res;
+    int target_index = -1;
+
+    if (!req) {
+        return;
+    }
+
+    evhttp_parse_query(req->uri, &res);
+    if ((value = evhttp_find_header(&res, "index")) != NULL) {
+        target_index = atoi(value);
+    } else {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "BADREQUEST", NULL);
+        return;
+    }
+
+    if (target_index == -1) {
+        evhttp_send_reply(req, HTTP_INTERNAL, "INTERNAL", NULL);
+        return;
+    }
+
+    for (child_iter = child_processes.begin(); child_iter != child_processes.end();
+                child_iter++) {
+        if (child_iter->index == target_index) {
+            cur_rtsp_child = child_iter->pid;
+            break;
+        }
+    }
+
+    if (cur_rtsp_child == -1) {
+        evhttp_send_reply(req, HTTP_BADREQUEST, "BADREQUEST", NULL);
+        return;
+    } else {
+        evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+    }
+
+    // start up rtsp server
+    kill(cur_rtsp_child, SIGUSR1);
+}
+
+void kill_rtsp_serv(struct evhttp_request *req, void *arg)
+{
+    if (cur_rtsp_child == -1) {
+        evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+        return;
+    }
+
+    // stop rtsp server
+    kill(cur_rtsp_child, SIGUSR2);
+    cur_rtsp_child = -1;
+    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
 }
 
 int prepar_socket(int port, int backlog)
@@ -496,14 +660,64 @@ int prepar_socket(int port, int backlog)
     return fd;
 }
 
-int start(int port, std::vector<std::string> *files)
+void *req_serv(void *arg)
 {
-    std::vector<struct child_info>::iterator child_iter;
-    std::vector<struct child_info> child_processes;
-    std::vector<std::string>::iterator file_iter;
     struct event_base *base = NULL;
     struct evhttp *httpd = NULL;
+
+    if (!arg) {
+        LOG_ERROR("create request service failed");
+        return NULL;
+    }
+
+    int port = *(int*)arg;
+    int fd = prepar_socket(port, 1024);
+    if (fd < 0) {
+        LOG_ERROR("prepar socket failed: %s", strerror(errno));
+        return NULL;
+    }
+
+    base = event_base_new();
+    if (!base) {
+        LOG_ERROR("event_base_new failed");
+        return NULL;
+    }
+
+    httpd = evhttp_new(base);
+    if (!httpd) {
+        LOG_ERROR("evhttp_new failed");
+        event_base_free(base);
+        return NULL;
+    }
+
+    if (evhttp_accept_socket(httpd, fd) != 0) {
+        LOG_ERROR("evhttp_accept_socket failed");
+        evhttp_free(httpd);
+        event_base_free(base);
+        return NULL;
+    }
+
+    evhttp_set_cb(httpd, "/query_streams", query_streams, NULL);
+    evhttp_set_cb(httpd, "/select_stream", select_stream, NULL);
+    evhttp_set_cb(httpd, "/kill_rtsp", kill_rtsp_serv, NULL);
+    //evhttp_set_gencb(httpd, gen_handler, NULL);
+
+    event_base_dispatch(base);
+
+    return NULL;
+}
+
+int start(int port, std::vector<std::string> *files)
+{
+    std::vector<std::string>::iterator file_iter;
+    int index = 0;
     int ret = 0;
+
+    pthread_t thread;
+    if ((ret = pthread_create(&thread, NULL, req_serv, (void*)&port)) != 0) {
+        LOG_WARN("failed creating request service thread: %s", strerror(ret));
+        return 1;
+    }
 
     child_processes.clear();
     for (file_iter = files->begin(); file_iter != files->end(); file_iter++) {
@@ -514,9 +728,10 @@ int start(int port, std::vector<std::string> *files)
         } else if (pid == 0) {
             exit(0);
         } else {
-            struct child_info tt;
-            tt.pid = pid;
+            Child_info tt;
             tt.file = *file_iter;
+            tt.index = index++;
+            tt.pid = pid;
             child_processes.push_back(tt);
         }
     }
@@ -531,58 +746,75 @@ int start(int port, std::vector<std::string> *files)
             }
         }
     }
+
+    LOG_WARN("proc exit");
     return 0;
+}
 
-    int fd = prepar_socket(port, 1024);
-    if (fd < 0) {
-        LOG_ERROR("prepar socket failed: %s", strerror(errno));
-        return -1;
+int get_rtsp_config(Json::Value config)
+{
+    std::map<std::string, std::string> stream;
+    Json::Value::Members::iterator iter;
+    Json::Value::Members members;
+
+    if (!config.isMember("RTSPPort") || !config.isMember("RTSPBindAddress") || !config.isMember("Streams")) {
+        LOG_ERROR("not found item named 'RTSPPort' or 'RTSPBindAddress' or 'Streams' in rtsp_config");
+        return 1;
+    } else {
+        if (!config["RTSPPort"].isString() || !config["RTSPBindAddress"].isString()) {
+            LOG_ERROR("item 'RTSPPort' or 'RTSPBindAddress' is not a string");
+            return 1;
+        }
+        if (!config["Streams"].isObject()) {
+            LOG_ERROR("item 'Streams' is not an object");
+            return 1;
+        }
     }
 
-    base = event_base_new();
-    if (base == NULL) {
-        LOG_ERROR("event_base_new failed");
-        ret = -1;
-        goto out;
+    rtsp_config = "";
+
+    members = config.getMemberNames();
+    for (iter = members.begin(); iter != members.end(); iter++) {
+        if (*iter == "Streams") {
+            continue;
+        } else {
+            if (config[*iter].isString()) {
+                rtsp_config += *iter + " " + config[*iter].asString() + "\n";
+            }
+        }
     }
+    if (config.isMember("Streams")) {
+        if (config["Streams"].isObject()) {
+            Json::Value streams = config["Streams"];
+            Json::Value::Members streams_mb;
+            Json::Value::Members::iterator streams_iter;
+            streams_mb = streams.getMemberNames();
 
-    httpd = evhttp_new(base);
-    if (httpd == NULL) {
-        LOG_ERROR("evhttp_new failed");
-        event_base_free(base);
-        base = NULL;
-        ret = -1;
-        goto out;
+            for (streams_iter = streams_mb.begin(); streams_iter != streams_mb.end();
+                    streams_iter++) {
+                Json::Value stream = streams[*streams_iter];
+                if (stream.empty()) {
+                    continue;
+                }
+                if (stream.isObject()) {
+                    Json::Value::Members stream_mb;
+                    Json::Value::Members::iterator stream_iter;
+                    stream_mb = stream.getMemberNames();
+                    std::string stream_val = "";
+                    for (stream_iter = stream_mb.begin(); stream_iter != stream_mb.end();
+                            stream_iter++) {
+                        if (stream[*stream_iter].isString()) {
+                            stream_val += *stream_iter + " " + stream[*stream_iter].asString() + "\n";
+                        }
+                    }
+                    if (stream_val != "") {
+                        rtsp_config += "<Stream " + *streams_iter + ">\n" + stream_val + "</Stream>\n";
+                    }
+                }
+            }
+        }
     }
-
-    if (evhttp_accept_socket(httpd, fd) != 0) {
-        LOG_ERROR("evhttp_accept_socket failed");
-        evhttp_free(httpd);
-        httpd = NULL;
-        event_base_free(base);
-        base = NULL;
-        ret = -1;
-        goto out;
-    }
-
-    evhttp_set_cb(httpd, "/stream_control", stream_control, NULL);
-    //evhttp_set_gencb(httpd, gen_handler, NULL);
-
-    event_base_dispatch(base);
-
-out:
-    for (child_iter = child_processes.begin(); child_iter != child_processes.end(); child_iter++) {
-        kill(child_iter->pid, SIGKILL);
-    }
-
-    if (httpd) {
-        evhttp_free(httpd);
-    }
-    if (base) {
-        event_base_free(base);
-    }
-
-    return ret;
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -615,7 +847,6 @@ int main(int argc, char **argv)
     }
 
     struct stat sb;
-    /*
     if (stat("log", &sb) == -1) {
         if (mkdir("log", 0755) < 0) {
             fprintf(stderr, "[main] mkdir log failed\n");
@@ -629,7 +860,20 @@ int main(int argc, char **argv)
             }
         }
     }
-    */
+
+    if (stat("tmp", &sb) == -1) {
+        if (mkdir("tmp", 0755) < 0) {
+            fprintf(stderr, "[main] mkdir tmp failed\n");
+            return 1;
+        }
+    } else {
+        if ((sb.st_mode & S_IFMT) != S_IFDIR) {
+            if (unlink("tmp") != 0) {
+                fprintf(stderr, "[main] ./tmp need to be a directory, but not, and rm failed\n");
+                return 1;
+            }
+        }
+    }
 
     memset(&sb, 0, sizeof(struct stat));
     if (stat(config_file, &sb) == -1) {
@@ -751,6 +995,22 @@ int main(int argc, char **argv)
     }
     if (!config["port"].isInt()) {
         LOG_ERROR("the item 'port' is not a integer");
+        ret = 1;
+        goto end;
+    }
+
+    if (!config.isMember("rtsp_config")) {
+        LOG_ERROR("there is no item named 'rtsp_config' in configure file");
+        ret = 1;
+        goto end;
+    }
+    if (!config["rtsp_config"].isObject()) {
+        LOG_ERROR("the item 'port' is not an object");
+        ret = 1;
+        goto end;
+    }
+    if (get_rtsp_config(config["rtsp_config"]) != 0) {
+        LOG_ERROR("get rtsp config failed");
         ret = 1;
         goto end;
     }

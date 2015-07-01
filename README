@@ -1,0 +1,17 @@
+Usage: 
+./decoder -f etc/decoder.conf
+
+RTSP-Server Usage:
+curl http://192.168.1.3:8888/query_streams
+curl http://192.168.1.3:8888/select_stream?index=0
+curl http://192.168.1.3:8888/kill_rtsp
+
+Build RTSP-Server:
+build the ffmpeg (libs)
+&
+replace ffmpeg source files with files in ffmpeg-rtsp_server dir
+&
+./build.sh
+
+gcc 4.4.7 success
+gcc 4.8.2 failed

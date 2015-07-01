@@ -1,0 +1,2 @@
+gcc -g -I ./ -I ../thirdparty/output/ffmpeg/include -L ../thirdparty/output/ffmpeg/lib -L ../thirdparty/output/openssl/lib ffserver.c ffserver_config.c cmdutils.c -Wl,--dn -pthread -lssl -lcrypto -lswresample -lavdevice -lavfilter -lswscale -lSDL -lavformat -lavcodec -lswresample -lavutil -lz -Wl,--dy -lrt -lm -ldl -lxcb-shape -lxcb-shm -lxcb-xfixes -lasound -c
+ar rcs librtsp.a cmdutils.o ffserver_config.o ffserver.o

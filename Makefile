@@ -33,7 +33,7 @@ LIBS=-L$(LIBEVENT)/lib \
 	 -L$(ZLIB)/lib
 
 LDFLAGS=-Wl,--dn -levent -lmylog -pthread -lcurl -lidn -lssl -lcrypto \
-		-ljsoncpp -lswresample -lavdevice -lavfilter -lswscale -lSDL \
+		-ljsoncpp -lrtsp -lswresample -lavdevice -lavfilter -lswscale -lSDL \
 		-lavformat -lavcodec -lswresample -lavutil -lz \
 		-Wl,--dy -lrt -ldl -lxcb-shape -lxcb-shm -lxcb-xfixes -lasound
 
@@ -44,7 +44,7 @@ CFLAGS=-fPIC -g -finline-functions -Wall -Werror
 all: $(TARGET)
 
 clean:
-	rm -rf *.o $(TARGET) log
+	rm -rf *.o $(TARGET) log tmp
 
 tiny_op: tiny_op.o
 	$(CC) $(LIBS) $^ $(LDFLAGS) -o $@
