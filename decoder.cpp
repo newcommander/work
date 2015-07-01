@@ -200,8 +200,6 @@ int open_temp_file(AVFormatContext *ifmt_ctx, AVFormatContext **ofmt_ctx, char *
     unsigned int i = 0;
     int ret = 0;
 
-    AVFormatContext *p_fmt = NULL;
-
     if (!ifmt_ctx || !ofmt_ctx) {
         LOG_ERROR("invalid paramters when open temp file for %s", filename);
         return 1;
@@ -212,7 +210,6 @@ int open_temp_file(AVFormatContext *ifmt_ctx, AVFormatContext **ofmt_ctx, char *
         LOG_ERROR("alloc ofmt_ctx failed for %s: %s", filename, av_err2str(ret));
         return 1;
     }
-    p_fmt = *ofmt_ctx;
 
     int is_there_video_stream = 0;
     int is_there_audio_stream = 0;
@@ -400,6 +397,7 @@ int stream_process(char *filename)
     pkt.data = NULL;
     pkt.size = 0;
 
+    int64_t tt = 0;
     int got_frame = 0;
     int stream_index = 0;
     int read_error_counter = 0;
@@ -441,7 +439,11 @@ int stream_process(char *filename)
             pkt.size -= ret;
         } while (pkt.size > 0);
         if (got_frame) {
-            frame->pts = av_frame_get_best_effort_timestamp(frame);
+            if (frame->pts == AV_NOPTS_VALUE) {
+                frame->pts = tt++;
+            } else {
+                frame->pts = av_frame_get_best_effort_timestamp(frame);
+            }
 
             if (type == AVMEDIA_TYPE_VIDEO) {
                 fun(frame, ifmt_ctx->streams[stream_index]->codec->pix_fmt);

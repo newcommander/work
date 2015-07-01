@@ -3,7 +3,9 @@
     "log_leave" : 16,
     "port" : 8888,
     "streams" : [
-        "http://live.3gv.ifeng.com/live/hongkong.m3u8"
+        "http://192.168.1.5:8080/video.rm",
+        "http://live.3gv.ifeng.com/zixun800k.m3u8",
+        "http://live.3gv.ifeng.com/hongkong800k.m3u8"
     ],
     "rtsp_config" : {
         "RTSPPort" : "9090",
