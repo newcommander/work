@@ -322,7 +322,8 @@ int open_temp_file(AVFormatContext *ifmt_ctx, AVFormatContext **ofmt_ctx, char *
 }
 
 int add_to_show_stream(AVCodecContext *codec, const AVFrame *frame, 
-        int (*enc_func)(AVCodecContext *, AVPacket *, const AVFrame *, int *))
+        int (*enc_func)(AVCodecContext *, AVPacket *, const AVFrame *, int *),
+        int64_t pts, int duration)
 {
     int got_packet = 0;
     int ret = 0;
@@ -339,6 +340,8 @@ int add_to_show_stream(AVCodecContext *codec, const AVFrame *frame,
     }
 
     if (got_packet) {
+        pkt.pts = pts;
+        pkt.duration = duration;
         if (insert_pkt(&pkt) != 0) {
             LOG_ERROR("insert packet failed");
             av_free_packet(&pkt);
@@ -448,7 +451,7 @@ int stream_process(char *filename)
             if (type == AVMEDIA_TYPE_VIDEO) {
                 fun(frame, ifmt_ctx->streams[stream_index]->codec->pix_fmt);
                 if (need_delive_pkt) {
-                    ret = add_to_show_stream(ofmt_ctx->streams[stream_index]->codec, frame, enc_func);
+                    ret = add_to_show_stream(ofmt_ctx->streams[stream_index]->codec, frame, enc_func, pkt.pts, pkt.duration);
                     if (ret != 0) {
                         LOG_ERROR("failed adding frame to show stream");
                     }
